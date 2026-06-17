@@ -1,0 +1,318 @@
+[
+  {
+    "name": "Basis_SOL",
+    "class": "basis",
+    "pairs": [
+      "SOL"
+    ],
+    "params": {
+      "entry_z": 2.0,
+      "exit_z": 0.5,
+      "max_hold": 48
+    },
+    "walk_forward": {
+      "profit_factor": 119.933,
+      "win_rate": 0.565,
+      "trades": 82
+    },
+    "holdout": {
+      "return": 8.19,
+      "win_rate": 0.667,
+      "trades": 15,
+      "profit_factor": 2.391
+    }
+  },
+  {
+    "name": "Basis_ADA",
+    "class": "basis",
+    "pairs": [
+      "ADA"
+    ],
+    "params": {
+      "entry_z": 2.0,
+      "exit_z": 0.5,
+      "max_hold": 48
+    },
+    "walk_forward": {
+      "profit_factor": 119.833,
+      "win_rate": 0.558,
+      "trades": 116
+    },
+    "holdout": {
+      "return": 0.98,
+      "win_rate": 0.565,
+      "trades": 23,
+      "profit_factor": 1.061
+    }
+  },
+  {
+    "name": "Basis_tight_BNB",
+    "class": "basis_tight",
+    "pairs": [
+      "BNB"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 113.542,
+      "win_rate": 0.624,
+      "trades": 135
+    },
+    "holdout": {
+      "return": 4.92,
+      "win_rate": 0.684,
+      "trades": 19,
+      "profit_factor": 1.772
+    }
+  },
+  {
+    "name": "Basis_TAO",
+    "class": "basis",
+    "pairs": [
+      "TAO"
+    ],
+    "params": {
+      "entry_z": 2.0,
+      "exit_z": 0.5,
+      "max_hold": 48
+    },
+    "walk_forward": {
+      "profit_factor": 56.783,
+      "win_rate": 0.406,
+      "trades": 87
+    },
+    "holdout": {
+      "return": 1.0,
+      "win_rate": 0.556,
+      "trades": 18,
+      "profit_factor": 1.063
+    }
+  },
+  {
+    "name": "Basis_tight_SOL",
+    "class": "basis_tight",
+    "pairs": [
+      "SOL"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 3.259,
+      "win_rate": 0.575,
+      "trades": 215
+    },
+    "holdout": {
+      "return": 5.25,
+      "win_rate": 0.613,
+      "trades": 31,
+      "profit_factor": 1.362
+    }
+  },
+  {
+    "name": "Basis_tight_DOGE",
+    "class": "basis_tight",
+    "pairs": [
+      "DOGE"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 1.731,
+      "win_rate": 0.581,
+      "trades": 236
+    },
+    "holdout": {
+      "return": 1.39,
+      "win_rate": 0.632,
+      "trades": 38,
+      "profit_factor": 1.073
+    }
+  },
+  {
+    "name": "Basis_tight_WLD",
+    "class": "basis_tight",
+    "pairs": [
+      "WLD"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 1.615,
+      "win_rate": 0.5,
+      "trades": 237
+    },
+    "holdout": {
+      "return": 20.53,
+      "win_rate": 0.56,
+      "trades": 25,
+      "profit_factor": 1.452
+    }
+  },
+  {
+    "name": "Basis_tight_XRP",
+    "class": "basis_tight",
+    "pairs": [
+      "XRP"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 1.524,
+      "win_rate": 0.52,
+      "trades": 234
+    },
+    "holdout": {
+      "return": 8.36,
+      "win_rate": 0.68,
+      "trades": 25,
+      "profit_factor": 1.752
+    }
+  },
+  {
+    "name": "Basis_tight_BTC",
+    "class": "basis_tight",
+    "pairs": [
+      "BTC"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 1.455,
+      "win_rate": 0.442,
+      "trades": 260
+    },
+    "holdout": {
+      "return": 5.99,
+      "win_rate": 0.529,
+      "trades": 34,
+      "profit_factor": 1.897
+    }
+  },
+  {
+    "name": "Basis_tight_UNI",
+    "class": "basis_tight",
+    "pairs": [
+      "UNI"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 1.341,
+      "win_rate": 0.48,
+      "trades": 307
+    },
+    "holdout": {
+      "return": 9.92,
+      "win_rate": 0.531,
+      "trades": 32,
+      "profit_factor": 1.822
+    }
+  },
+  {
+    "name": "Basis_tight_SUI",
+    "class": "basis_tight",
+    "pairs": [
+      "SUI"
+    ],
+    "params": {
+      "entry_z": 1.5,
+      "exit_z": 0.25,
+      "max_hold": 36
+    },
+    "walk_forward": {
+      "profit_factor": 1.253,
+      "win_rate": 0.501,
+      "trades": 288
+    },
+    "holdout": {
+      "return": 25.26,
+      "win_rate": 0.682,
+      "trades": 44,
+      "profit_factor": 2.74
+    }
+  },
+  {
+    "name": "XGBoost_12h",
+    "class": "ml_xgboost",
+    "pairs": [
+      "ALL"
+    ],
+    "params": {
+      "threshold": 0.7,
+      "features": [
+        "basis_z",
+        "rsi",
+        "vol_rank",
+        "vol_ratio",
+        "mom_6h",
+        "mom_24h",
+        "atr_ratio",
+        "bb_position",
+        "volume_z",
+        "price_vs_ma"
+      ],
+      "n_estimators": 100,
+      "max_depth": 4
+    },
+    "walk_forward": {
+      "accuracy": 0.5471,
+      "trades": 4173
+    },
+    "holdout": {
+      "accuracy": 0.574,
+      "trades": 493
+    }
+  },
+  {
+    "name": "XGBoost_no_basis_12h",
+    "class": "ml_xgboost",
+    "pairs": [
+      "ALL"
+    ],
+    "params": {
+      "threshold": 0.7,
+      "features": [
+        "rsi",
+        "vol_rank",
+        "vol_ratio",
+        "mom_6h",
+        "mom_24h",
+        "atr_ratio",
+        "bb_position",
+        "volume_z",
+        "price_vs_ma"
+      ],
+      "n_estimators": 80,
+      "max_depth": 4
+    },
+    "walk_forward": {
+      "accuracy": 0.554,
+      "trades": 3716
+    },
+    "holdout": {
+      "accuracy": 0.596,
+      "trades": 421
+    }
+  }
+]

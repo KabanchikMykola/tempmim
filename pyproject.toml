@@ -1,0 +1,17 @@
+[project]
+name = "cross-exchange-finder"
+version = "0.1.0"
+description = "Поиск криптоинструментов на Binance, Bybit и OKX"
+requires-python = ">=3.12"
+dependencies = [
+    "ccxt>=4.5.0",
+    "dash>=2.17.0",
+    "dash-bootstrap-components>=1.6.0",
+    "pandas>=2.2.0",
+    "pyarrow>=17.0.0",
+    "duckdb>=1.0.0",
+    "huggingface_hub>=0.25.0",
+    "statsmodels>=0.14.0",
+    "xgboost>=3.2.0",
+    "scikit-learn>=1.9.0",
+]

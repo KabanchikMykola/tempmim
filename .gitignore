@@ -1,0 +1,25 @@
+# Data files
+data/
+*.parquet
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Old/trash
+old_trash/
+
+# Temporary
+*.tmp
+*.log
