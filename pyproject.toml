@@ -14,4 +14,8 @@ dependencies = [
     "statsmodels>=0.14.0",
     "xgboost>=3.2.0",
     "scikit-learn>=1.9.0",
+    "requests>=2.31.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["data_fetcher*"]
