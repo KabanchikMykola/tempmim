@@ -56,28 +56,47 @@ def load_all():
 
 def add_features(df):
     df = df.copy()
+    # Basis z-score (использует текущий basis — OK, т.к. basis = perp/spot, оба известны в t)
     df["basis_z"] = (df["basis"] - df["basis"].rolling(168).mean()) / df["basis"].rolling(168).std()
+
+    # RSI — shift(1) чтобы не использовать close[t] для предсказания в t
     d = df["spot"].diff()
     g = d.clip(lower=0).rolling(14).mean()
     l = (-d.clip(upper=0)).rolling(14).mean().replace(0, 1)
-    df["rsi"] = 100 - (100 / (1 + g / l))
-    df["vol"] = df["returns"].rolling(24).std() * np.sqrt(8760)
+    df["rsi"] = (100 - (100 / (1 + g / l))).shift(1)
+
+    # Волатильность — shift(1)
+    df["vol"] = (df["returns"].rolling(24).std() * np.sqrt(8760)).shift(1)
     df["vol_rank"] = df["vol"].rolling(168).rank(pct=True)
-    df["vol_ratio"] = df["vol_"] / df["vol_"].rolling(24).mean()
-    df["mom_6h"] = df["spot"].pct_change(6)
-    df["mom_24h"] = df["spot"].pct_change(24)
+
+    # Объёмные фичи — shift(1)
+    df["vol_ratio"] = (df["vol_"] / df["vol_"].rolling(24).mean()).shift(1)
+
+    # Моментум — shift(1)
+    df["mom_6h"] = df["spot"].pct_change(6).shift(1)
+    df["mom_24h"] = df["spot"].pct_change(24).shift(1)
+
+    # ATR — shift(1)
     tr = pd.concat([
         df["high_"] - df["low_"],
         (df["high_"] - df["spot"].shift(1)).abs(),
         (df["low_"] - df["spot"].shift(1)).abs()
     ], axis=1).max(axis=1)
     df["atr14"] = tr.rolling(14).mean()
-    df["atr_ratio"] = df["atr14"] / df["spot"]
+    df["atr_ratio"] = (df["atr14"] / df["spot"]).shift(1)
+
+    # Bollinger — shift(1)
     ma = df["spot"].rolling(24).mean()
     std = df["spot"].rolling(24).std()
-    df["bb_position"] = (df["spot"] - (ma - 2 * std)) / (4 * std)
-    df["volume_z"] = (df["vol_"] - df["vol_"].rolling(24).mean()) / df["vol_"].rolling(24).std()
-    df["price_vs_ma"] = df["spot"] / ma - 1
+    df["bb_position"] = ((df["spot"] - (ma - 2 * std)) / (4 * std)).shift(1)
+
+    # Volume z-score — shift(1)
+    df["volume_z"] = ((df["vol_"] - df["vol_"].rolling(24).mean()) / df["vol_"].rolling(24).std()).shift(1)
+
+    # Price vs MA — shift(1)
+    df["price_vs_ma"] = (df["spot"] / ma - 1).shift(1)
+
+    # Таргет
     df["fwd_12h_dir"] = np.sign(df["spot"].shift(-12) / df["spot"] - 1)
     df["target"] = df["fwd_12h_dir"]
     return df
