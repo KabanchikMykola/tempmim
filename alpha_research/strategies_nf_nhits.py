@@ -180,10 +180,15 @@ def add_features(df):
 
 
 def _prepare_nf_df(df, feature_cols):
-    """Подготовить DataFrame для NeuralForecast (unique_id, ds, y + exog)."""
+    """Подготовить DataFrame для NeuralForecast (unique_id, ds, y + exog).
+
+    ds — per-unique_id монотонный индекс (cumcount), НЕ глобальный range.
+    При multi-asset данные конкатенируются, поэтому каждой серии нужна
+    своя ось времени [0..N_i]. Иначе NF трактует все активы как одну серию.
+    """
     nf = df[["base", "timestamp", "fwd_ret_12h"] + feature_cols].copy()
     nf = nf.rename(columns={"base": "unique_id", "timestamp": "ds", "fwd_ret_12h": "y"})
-    nf["ds"] = range(len(nf))
+    nf["ds"] = nf.groupby("unique_id").cumcount()
     return nf
 
 
@@ -250,7 +255,9 @@ def walk_forward_nhits(all_dfs, h=12, threshold=0.001):
             cursor += WF_TEST_MS
             continue
 
-        # Per-asset predict: concat train+test для каждого актива
+        # Per-asset predict: NeuralForecast сам генерирует h-step forecast.
+        # НЕ передаём test-данные в predict — это misuse API.
+        # predict(df=asset_train) вернёт h=12 прогнозов для этого актива.
         fold_preds = 0
         for asset in test_df["base"].unique():
             asset_train = train_df[train_df["base"] == asset]
@@ -259,13 +266,12 @@ def walk_forward_nhits(all_dfs, h=12, threshold=0.001):
             if len(asset_test) < h:
                 continue
 
-            # Concat train+test для корректного ds
-            full_asset = pd.concat([asset_train, asset_test], ignore_index=True)
-            nf_full = _prepare_nf_df(full_asset, feature_cols)
+            nf_asset_train = _prepare_nf_df(asset_train, feature_cols)
 
             try:
-                forecast = nf.predict(nf_full.iloc[len(asset_train):])
-            except Exception:
+                forecast = nf.predict(df=nf_asset_train)
+            except Exception as e:
+                print(f"  Fold {fold}/{asset} predict error: {e}")
                 continue
 
             if forecast is None or forecast.empty:
@@ -374,12 +380,12 @@ def holdout_nhits(all_dfs, h=12, threshold=0.001):
         if len(asset_test) < h:
             continue
 
-        full_asset = pd.concat([asset_train, asset_test], ignore_index=True)
-        nf_full = _prepare_nf_df(full_asset, feature_cols)
+        nf_asset_train = _prepare_nf_df(asset_train, feature_cols)
 
         try:
-            forecast = nf.predict(nf_full.iloc[len(asset_train):])
-        except Exception:
+            forecast = nf.predict(df=nf_asset_train)
+        except Exception as e:
+            print(f"  Holdout/{asset} predict error: {e}")
             continue
 
         if forecast is None or forecast.empty:

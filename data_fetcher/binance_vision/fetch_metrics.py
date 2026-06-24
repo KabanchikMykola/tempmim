@@ -123,6 +123,7 @@ def download_daily(symbol, date_str):
     try:
         resp = requests.get(url, timeout=config.VISION_TIMEOUT)
         if resp.status_code != 200:
+            print(f"    S3 HTTP {resp.status_code} для {symbol}/{date_str}")
             return pd.DataFrame()
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
             with zf.open(zf.namelist()[0]) as f:
@@ -136,8 +137,8 @@ def download_daily(symbol, date_str):
                 for col in METRICS_COLS[2:]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                 return df
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"    S3 ошибка {symbol}/{date_str}: {type(e).__name__}: {e}")
     return pd.DataFrame()
 
 
