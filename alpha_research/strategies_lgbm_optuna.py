@@ -2,9 +2,11 @@
 
 Идеи взяты из run_hybrid_optimizer.py и backtest_model.py:
 - Optuna для подбора гиперпараметров
-- Walk-forward CV
-- Feature importance
-- Метрики: DA, Sharpe, IC
+- Walk-forward CV + Holdout
+- Feature importance (на лучшей модели)
+- Метрики: DA, F1
+- LGBMClassifier (не регрессор)
+- Holdout: ретрейн на всех данных
 """
 
 import sys, io, json, time, warnings
@@ -13,8 +15,7 @@ from pathlib import Path
 import lightgbm as lgb
 import optuna
 from optuna.samplers import TPESampler
-from scipy.stats import pearsonr
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 
 warnings.filterwarnings("ignore")
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -58,7 +59,7 @@ def add_features(df):
     df["basis_z"] = (df["basis"] - df["basis"].rolling(168).mean()) / df["basis"].rolling(168).std()
     d = df["spot"].diff()
     g = d.clip(lower=0).rolling(14).mean()
-    l = (-d.clip(upper=0)).rolling(14).mean()
+    l = (-d.clip(upper=0)).rolling(14).mean().replace(0, 1)
     df["rsi"] = 100 - (100 / (1 + g / l))
     df["vol"] = df["returns"].rolling(24).std() * np.sqrt(8760)
     df["vol_rank"] = df["vol"].rolling(168).rank(pct=True)
@@ -90,16 +91,6 @@ def prepare_data(all_dfs):
     return combined
 
 
-def calc_metrics(y_true, y_pred):
-    """Метрики из run_hybrid_optimizer.py."""
-    da = accuracy_score(np.sign(y_true), np.sign(y_pred))
-    corr, _ = pearsonr(y_true, y_pred)
-    returns = y_pred
-    downside = returns[returns < 0]
-    sharpe = np.mean(returns) / np.std(downside) if len(downside) > 0 and np.std(downside) > 0 else 0
-    return {"DA": da, "IC": corr, "Sharpe": sharpe}
-
-
 def walk_forward_evaluate(combined, params, entry_threshold=0.6):
     """Walk-forward оценка с заданными параметрами."""
     start = combined["timestamp"].iloc[0]
@@ -116,16 +107,22 @@ def walk_forward_evaluate(combined, params, entry_threshold=0.6):
             continue
 
         X_train = train[FEATURES].values
-        y_train = ((train["target"].values + 1) / 2)  # LightGBM binary
+        y_train = train["target"].values.astype(int)
         X_test = test[FEATURES].values
-        y_test = test["target"].values
+        y_test = test["target"].values.astype(int)
 
-        model = lgb.LGBMRegressor(**params, random_state=42, n_jobs=-1, verbose=-1)
+        model = lgb.LGBMClassifier(**params, random_state=42, n_jobs=-1, verbose=-1)
         model.fit(X_train, y_train, eval_set=[(X_test, y_test)],
                   callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)])
 
-        preds = model.predict(X_test, num_iteration=model.best_iteration_)
-        pred_dir = np.where(preds > entry_threshold, 1, np.where(preds < (1 - entry_threshold), -1, 0))
+        proba = model.predict_proba(X_test, num_iteration=model.best_iteration_)
+        # proba[:, 1] = P(class=1), proba[:, -1] = P(class=-1)
+        pred_class = model.predict(X_test, num_iteration=model.best_iteration_)
+
+        # entry_threshold: насколько уверенно предсказание должно быть
+        max_proba = proba.max(axis=1)
+        confident = max_proba > entry_threshold
+        pred_dir = np.where(confident, pred_class, 0)
 
         for i in range(len(test)):
             if pred_dir[i] != 0:
@@ -133,8 +130,7 @@ def walk_forward_evaluate(combined, params, entry_threshold=0.6):
                     "correct": 1 if pred_dir[i] == y_test[i] else 0,
                     "pred": pred_dir[i],
                     "actual": y_test[i],
-                    "pred_raw": preds[i],
-                    "actual_raw": y_test[i],
+                    "confidence": max_proba[i],
                 })
         cursor += WF_TEST
 
@@ -142,53 +138,57 @@ def walk_forward_evaluate(combined, params, entry_threshold=0.6):
         return None, None
 
     y_true = np.array([t["actual"] for t in all_trades])
-    y_pred = np.array([t["pred_raw"] for t in all_trades])
-    metrics = calc_metrics(y_true, y_pred)
-    metrics["trades"] = len(all_trades)
-    metrics["accuracy"] = sum(t["correct"] for t in all_trades) / len(all_trades)
+    y_pred = np.array([t["pred"] for t in all_trades])
+    da = accuracy_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred, average="macro")
+    trades_count = len(all_trades)
+    accuracy = sum(t["correct"] for t in all_trades) / trades_count
+
+    metrics = {"DA": da, "F1": f1, "trades": trades_count, "accuracy": accuracy}
     return metrics, model
 
 
-def holdout_test(combined, model, entry_threshold=0.6):
-    """Holdout тест на последних HOLDOUT_DAYS днях."""
+def holdout_test(combined, params, entry_threshold=0.6):
+    """Holdout тест: ретрейн на всех данных кроме holdout, потом тест."""
     cutoff = combined["timestamp"].iloc[-1] - HOLDOUT_DAYS * 24 * 3600000
+    train = combined[combined["timestamp"] < cutoff]
     test = combined[combined["timestamp"] >= cutoff].copy()
-    if len(test) < 50:
-        return None
+    if len(train) < 500 or len(test) < 50:
+        return None, None
 
-    X = test[FEATURES].values
-    y = test["target"].values
-    preds = model.predict(X, num_iteration=model.best_iteration_)
-    pred_dir = np.where(preds > entry_threshold, 1, np.where(preds < (1 - entry_threshold), -1, 0))
+    X_train = train[FEATURES].values
+    y_train = train["target"].values.astype(int)
+    X_test = test[FEATURES].values
+    y_test = test["target"].values.astype(int)
+
+    model = lgb.LGBMClassifier(**params, random_state=42, n_jobs=-1, verbose=-1)
+    model.fit(X_train, y_train, eval_set=[(X_test, y_test)],
+              callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)])
+
+    proba = model.predict_proba(X_test, num_iteration=model.best_iteration_)
+    pred_class = model.predict(X_test, num_iteration=model.best_iteration_)
+    max_proba = proba.max(axis=1)
+    confident = max_proba > entry_threshold
+    pred_dir = np.where(confident, pred_class, 0)
 
     trades = []
     for i in range(len(test)):
         if pred_dir[i] != 0:
-            trades.append({"correct": 1 if pred_dir[i] == y[i] else 0, "pred_raw": preds[i], "actual_raw": y[i]})
+            trades.append({"correct": 1 if pred_dir[i] == y_test[i] else 0, "pred": pred_dir[i], "actual": y_test[i]})
 
     if not trades:
-        return None
+        return None, model
 
-    y_true = np.array([t["actual_raw"] for t in trades])
-    y_pred = np.array([t["pred_raw"] for t in trades])
-    metrics = calc_metrics(y_true, y_pred)
-    metrics["trades"] = len(trades)
-    metrics["accuracy"] = sum(t["correct"] for t in trades) / len(trades)
-    return metrics
-
-
-def feature_importance(model, X, y):
-    """Feature importance из LightGBM."""
-    model.fit(X, y)
-    fi = pd.DataFrame({
-        "feature": FEATURES,
-        "importance": model.feature_importances_
-    }).sort_values("importance", ascending=False)
-    return fi
+    y_true = np.array([t["actual"] for t in trades])
+    y_pred = np.array([t["pred"] for t in trades])
+    da = accuracy_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred, average="macro")
+    metrics = {"DA": da, "F1": f1, "trades": len(trades), "accuracy": sum(t["correct"] for t in trades) / len(trades)}
+    return metrics, model
 
 
 def objective(trial, combined):
-    """Optuna objective — максимизируем IC на walk-forward."""
+    """Optuna objective — максимизируем DA на walk-forward."""
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 100, 500),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -205,7 +205,7 @@ def objective(trial, combined):
     if metrics is None:
         return -999
 
-    return metrics["IC"]
+    return metrics["DA"]
 
 
 def main():
@@ -225,27 +225,28 @@ def main():
     )
     study.optimize(lambda trial: objective(trial, combined), n_trials=N_TRIALS, show_progress_bar=True)
 
-    print(f"\nЛучший IC: {study.best_value:.4f}")
+    print(f"\nЛучший DA: {study.best_value:.4f}")
     print(f"Лучшие параметры: {study.best_params}")
 
     # Финальная оценка
     best_params = {k: v for k, v in study.best_params.items() if k != "threshold"}
     best_threshold = study.best_params["threshold"]
 
-    wf_metrics, best_model = walk_forward_evaluate(combined, best_params, entry_threshold=best_threshold)
-    ho_metrics = holdout_test(combined, best_model, entry_threshold=best_threshold)
+    wf_metrics, wf_model = walk_forward_evaluate(combined, best_params, entry_threshold=best_threshold)
+    ho_metrics, ho_model = holdout_test(combined, best_params, entry_threshold=best_threshold)
 
     if wf_metrics:
-        print(f"\nWalk-Forward: IC={wf_metrics['IC']:.4f} DA={wf_metrics['DA']:.1%} trades={wf_metrics['trades']}")
+        print(f"\nWalk-Forward: DA={wf_metrics['DA']:.1%} F1={wf_metrics['F1']:.3f} trades={wf_metrics['trades']}")
     if ho_metrics:
-        print(f"Holdout:      IC={ho_metrics['IC']:.4f} DA={ho_metrics['DA']:.1%} trades={ho_metrics['trades']}")
+        print(f"Holdout:      DA={ho_metrics['DA']:.1%} F1={ho_metrics['F1']:.3f} trades={ho_metrics['trades']}")
 
-    # Feature importance
-    if best_model:
-        X_all = combined[FEATURES].values
-        y_all = ((combined["target"].values + 1) / 2)
-        fi = feature_importance(best_model, X_all, y_all)
-        print("\nFeature Importance:")
+    # Feature importance на лучшей модели (обученной на всех данных)
+    if ho_model:
+        fi = pd.DataFrame({
+            "feature": FEATURES,
+            "importance": ho_model.feature_importances_
+        }).sort_values("importance", ascending=False)
+        print("\nFeature Importance (holdout model):")
         print(fi.to_string(index=False))
 
     # Сохранение
@@ -257,7 +258,7 @@ def main():
             "params": {**best_params, "threshold": best_threshold, "features": FEATURES},
             "walk_forward": {k: round(v, 4) if isinstance(v, float) else v for k, v in wf_metrics.items()},
             "holdout": {k: round(v, 4) if isinstance(v, float) else v for k, v in ho_metrics.items()},
-            "optuna_best_ic": round(study.best_value, 4),
+            "optuna_best_da": round(study.best_value, 4),
         }
 
         existing = []
