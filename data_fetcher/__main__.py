@@ -80,7 +80,6 @@ def main():
     p_fund = sub.add_parser("funding", help="Funding rate из S3")
     p_fund.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"], help="Тикеры")
     p_fund.add_argument("--years", type=int, default=3, help="Сколько лет")
-    p_fund.add_argument("--klines", action="store_true", help="Также загрузить перп klines (15m)")
 
     # --- symbols ---
     p_sym = sub.add_parser("symbols", help="Символы с Binance (exchangeInfo)")
@@ -175,7 +174,7 @@ def _run_book_depth(args):
 
 
 def _run_funding(args):
-    from data_fetcher.binance_vision.fetch_funding import fetch_funding, fetch_perp_klines
+    from data_fetcher.binance_vision.fetch_funding import fetch_funding
 
     import time as ttime
     t0 = ttime.time()
@@ -183,10 +182,6 @@ def _run_funding(args):
         print(f"  {symbol}: загрузка funding...", end=" ", flush=True)
         df = fetch_funding(symbol, args.years)
         print(f"{len(df):,} записей")
-        if args.klines:
-            print(f"  {symbol}: загрузка perp klines...", end=" ", flush=True)
-            df_k = fetch_perp_klines(symbol, "15m", args.years)
-            print(f"{len(df_k):,} баров")
     print(f"\n  Время: {ttime.time()-t0:.1f}s")
 
 

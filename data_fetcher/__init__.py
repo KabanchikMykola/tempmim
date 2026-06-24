@@ -17,7 +17,7 @@ from data_fetcher.ccxt_api.fetcher import (
 from data_fetcher.binance_vision.fetch_klines import fetch_symbol as fetch_klines
 from data_fetcher.binance_vision.fetch_agg_trades import fetch_range as fetch_agg_trades
 from data_fetcher.binance_vision.fetch_book_depth import fetch_range as fetch_book_depth
-from data_fetcher.binance_vision.fetch_funding import fetch_funding, fetch_perp_klines
+from data_fetcher.binance_vision.fetch_funding import fetch_funding
 from data_fetcher.binance_api.fetch_symbols import fetch_all as fetch_symbols
 
 __all__ = [
@@ -29,6 +29,5 @@ __all__ = [
     "fetch_agg_trades",
     "fetch_book_depth",
     "fetch_funding",
-    "fetch_perp_klines",
     "fetch_symbols",
 ]
