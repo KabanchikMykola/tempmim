@@ -28,6 +28,15 @@ python -m data_fetcher ohlcv ccxt --common --since 2026-01-01
 # Download from Binance S3 archives
 python -m data_fetcher ohlcv vision --symbol BTCUSDT --interval 1h
 
+# All common symbols (from symbols/spot_perpetual_common_usdt.json)
+python -m data_fetcher ohlcv vision --all --years 2
+
+# + tail via REST API (last 48h, no gaps for current month)
+python -m data_fetcher ohlcv vision --symbol BTCUSDT --tail
+
+# Tail only (skip S3, merge with existing parquet)
+python -m data_fetcher ohlcv vision --symbol BTCUSDT --tail-only
+
 # Audit 17 exchanges for data availability
 python -m data_fetcher exchange-audit --exchanges binance bybit okx
 
@@ -58,7 +67,7 @@ Package structure:
 data_fetcher/
   ccxt_api/          — OHLCV via ccxt API (spot + perp), exchange audit
   binance_vision/    — Historical data from data.binance.vision (S3)
-  binance_api/       — Binance REST API (exchangeInfo)
+  binance_api/       — Binance REST API (exchangeInfo, OHLCV tail)
   websocket/         — Realtime WebSocket pipeline (ccxt.pro)
   config.py          — MIN_VOLUME_USD, SINCE, TIMEFRAME, WORKERS
   audit.py           — Data quality audit for parquet files
@@ -69,6 +78,7 @@ data_fetcher/
 - `ccxt_api/fetcher.py` — `discover_common_symbols()`, `run_download()`, `upload_to_bucket()`
 - `binance_vision/fetch_klines.py` — `fetch_symbol()` handles both spot + perp klines
 - `binance_vision/fetch_funding.py` — `fetch_funding()` for funding rates only
+- `binance_api/klines.py` — `fetch_tail()` Binance REST API (last 48h, no key needed)
 - `ccxt_api/exchange_audit.py` — `run_audit()` checks data availability across 17 exchanges
 
 ## alpha_research/
@@ -112,6 +122,28 @@ python alpha_research/strategies_basis.py
 4. **Composite metric** — DA alone is insufficient. Use DA + Corr (or DA + F1) for model selection.
 5. **Cross-asset features** — BTC vs ETH spreads are strong predictors. Not yet implemented in current codebase.
 6. **Funding rate** — short lags are useless. Only long lags (24h+) have signal.
+
+## Data quality
+
+### Timestamp normalization
+- `open_time`/`close_time` ALWAYS in milliseconds. Per-row check: `if x > 1e14 → // 1000`.
+- `ts` всегда равен `open_time` (после нормализации оба в ms).
+- Parquet files имеют колонку `timestamp = ts` для совместимости с alpha_research.
+
+### Validation (автоматически при загрузке)
+- Zero-volume строки (биржевое ТО) удаляются.
+- Дубликаты по `ts` удаляются.
+- OHLC consistency: high >= low >= open/close.
+- Гэпы > 1.5x интервал детектятся и выводятся.
+
+### DuckDB caveats
+- INSERT в `klines` использует **явные имена колонок**, не `SELECT *` — порядок колонок в DataFrame не совпадает с таблицей.
+- `_db_insert_batch` фильтрует `df[df["ts"] > max_ts]` — дедупликация при повторном запуске.
+
+### Tail via REST API
+- `binance_api/klines.py:fetch_tail()` — 48 последних часов через Binance REST API.
+- Без API-ключа, бесплатно, ~1200 req/min.
+- `--tail`: S3 + API. `--tail-only`: только API (мерж с существующим parquet).
 
 ## No tests / No CI
 
