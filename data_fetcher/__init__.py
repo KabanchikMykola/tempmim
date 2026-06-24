@@ -11,6 +11,7 @@ from data_fetcher.ccxt_api.fetcher import (
     discover_common_symbols,
     run_download,
     upload_to_huggingface,
+    upload_to_bucket,
     get_exchange,
 )
 from data_fetcher.binance_vision.fetch_klines import fetch_symbol as fetch_klines

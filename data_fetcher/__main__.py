@@ -53,7 +53,8 @@ def main():
     p_ccxt.add_argument("--data-dir", type=Path, default=Path("data/common_1h"), help="Папка данных")
     p_ccxt.add_argument("--workers", type=int, default=8, help="Воркеров (default: 8)")
     p_ccxt.add_argument("--upload", action="store_true", help="Загрузить на HuggingFace")
-    p_ccxt.add_argument("--repo", type=str, help="HuggingFace repo ID")
+    p_ccxt.add_argument("--repo", type=str, help="HuggingFace repo ID (датасет)")
+    p_ccxt.add_argument("--bucket", type=str, help="HuggingFace bucket ID (напр. Kabanchik/mimo)")
 
     p_vision = ohlcv_sub.add_parser("vision", help="Из S3 архивов (data.binance.vision)")
     p_vision.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"], help="Тикеры")
@@ -129,6 +130,10 @@ def _run_ccxt(args):
 
     if args.upload and args.repo:
         upload_to_huggingface(args.data_dir, args.repo)
+
+    if args.upload and args.bucket:
+        from data_fetcher.ccxt_api.fetcher import upload_to_bucket
+        upload_to_bucket(args.data_dir, args.bucket)
 
 
 def _run_vision(args):

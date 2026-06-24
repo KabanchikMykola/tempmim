@@ -216,3 +216,13 @@ def upload_to_huggingface(data_dir: Path, repo_id: str, token: str | None = None
         api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
     upload_folder(repo_id=repo_id, repo_type="dataset", folder_path=str(data_dir), path_in_repo=data_dir.name, token=token)
     print(f"Загружено: https://huggingface.co/datasets/{repo_id}/tree/main/{data_dir.name}")
+
+
+def upload_to_bucket(data_dir: Path, bucket_id: str, token: str | None = None) -> None:
+    """Загрузить папку с parquet файлами в HuggingFace Bucket."""
+    from huggingface_hub import sync_bucket
+
+    remote = f"hf://buckets/{bucket_id}/{data_dir.name}"
+    print(f"Загрузка {data_dir} → {remote}")
+    sync_bucket(str(data_dir), remote, token=token)
+    print(f"Готово: https://huggingface.co/buckets/{bucket_id}/tree/main/{data_dir.name}")
