@@ -98,6 +98,7 @@ Standalone scripts (not importable package). Each runs independently.
 | `basis_realistic.py` | Basis backtest with realistic cost model |
 | `signal_search_v4.py` | Signal search with strict IC stability |
 | `volatility_regime_v3.py` | Volatility regime with dynamic exits |
+| `strategies_nf_nhits.py` | NHITS (NeuralForecast) 12h direction classifier with spot+perp+metrics |
 | `strategies.json` | Auto-generated: saved winning strategies |
 
 ### Archive (old versions)

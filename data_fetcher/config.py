@@ -16,7 +16,7 @@ WORKERS = 8                          # Количество параллельн
 # === Хранение ===
 DATA_DIR = Path("data")              # Корневая папка для всех данных
 HUGGINGFACE_REPO = None             # Репозиторий HF (None = не загружать)
-
+BUCKET_ID = "Kabanchik/mimo"          # HuggingFace Bucket ID (hf://buckets/{BUCKET_ID}/data/)
 CACHE_DIR = DATA_DIR / "cache"       # DuckDB кеш (binance_vision.db)
 
 # === Binance Vision (data.binance.vision S3 архивы) ===

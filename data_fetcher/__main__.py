@@ -6,6 +6,7 @@
   agg-trades       — Исторические aggTrades из S3
   book-depth       — Исторические bookDepth из S3
   funding          — Funding rate + перп klines из S3
+  metrics          — Derivatives metrics (OI, long/short ratios)
   symbols          — Символы с Binance (exchangeInfo)
   stream           — Реалтайм WebSocket pipeline
 """
@@ -96,6 +97,16 @@ def main():
     p_audit = sub.add_parser("exchange-audit", help="Аудит бирж: доступность данных")
     p_audit.add_argument("--exchanges", nargs="+", help="Список бирж (по умолчанию все)")
 
+    # --- metrics ---
+    p_metrics = sub.add_parser("metrics", help="Derivatives metrics (OI, long/short ratios)")
+    p_metrics.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"],
+                           help="Тикеры")
+    p_metrics.add_argument("--years", type=int, default=3, help="Сколько лет")
+    p_metrics.add_argument("--force", action="store_true",
+                           help="Принудительная перезагрузка")
+    p_metrics.add_argument("--summary", action="store_true",
+                           help="Сводка по кешу metrics")
+
     args = parser.parse_args()
 
     # --- dispatch ---
@@ -116,6 +127,8 @@ def main():
         _run_stream(args)
     elif args.command == "exchange-audit":
         _run_exchange_audit(args)
+    elif args.command == "metrics":
+        _run_metrics(args)
 
 
 def _run_ccxt(args):
@@ -238,6 +251,25 @@ def _run_stream(args):
 def _run_exchange_audit(args):
     from data_fetcher.ccxt_api.exchange_audit import run_audit
     run_audit(args.exchanges)
+
+
+def _run_metrics(args):
+    from data_fetcher.binance_vision.fetch_metrics import fetch_metrics, summary
+
+    if args.summary:
+        summary()
+        return
+
+    import time as ttime
+    t0 = ttime.time()
+    for symbol in args.symbol:
+        print(f"  {symbol}: загрузка metrics...", flush=True)
+        df, warnings = fetch_metrics(symbol, args.years, force=args.force)
+        for w in warnings:
+            print(w)
+        print(f"  {symbol}: {len(df):,} записей")
+    summary()
+    print(f"\n  Время: {ttime.time()-t0:.1f}s")
 
 
 if __name__ == "__main__":

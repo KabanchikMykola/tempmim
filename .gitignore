@@ -26,3 +26,6 @@ another_google_cloud_project/
 # Temporary
 *.tmp
 *.log
+
+# PyTorch Lightning training artifacts (TensorBoard events, hparams)
+lightning_logs/

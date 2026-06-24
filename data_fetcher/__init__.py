@@ -16,6 +16,7 @@ __all__ = [
     "fetch_agg_trades",
     "fetch_book_depth",
     "fetch_funding",
+    "fetch_metrics",
     "fetch_symbols",
 ]
 
@@ -45,6 +46,9 @@ def __getattr__(name):
     if name == "fetch_funding":
         from data_fetcher.binance_vision.fetch_funding import fetch_funding
         return fetch_funding
+    if name == "fetch_metrics":
+        from data_fetcher.binance_vision.fetch_metrics import fetch_metrics
+        return fetch_metrics
     if name == "fetch_symbols":
         from data_fetcher.binance_api.fetch_symbols import fetch_all as fetch_symbols
         return fetch_symbols
