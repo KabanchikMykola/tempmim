@@ -259,7 +259,12 @@ def _db_insert_batch(conn, df):
     if df_new.empty:
         return 0
 
-    conn.execute("INSERT INTO klines SELECT * FROM df_new")
+    conn.execute("""
+        INSERT INTO klines
+        SELECT symbol, source, interval, open_time, open, high, low, close,
+               volume, close_time, quote_volume, count, taker_buy_base,
+               taker_buy_quote, ts FROM df_new
+    """)
     return len(df_new)
 
 
