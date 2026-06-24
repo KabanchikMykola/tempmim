@@ -178,6 +178,7 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False, export_parquet=True
         return df
 
     # 3. Скачать с S3 и записать в DuckDB
+    import calendar
     now = datetime.now()
     tasks = []
     for year in range(now.year - years, now.year + 1):
@@ -186,9 +187,27 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False, export_parquet=True
                 break
             tasks.append((year, month))
 
+    def _fetch_month(yr, mo):
+        """Скачать месяц: сначала месячный архив, потом fallback на дневные."""
+        df = download_monthly(symbol, interval, yr, mo, perp)
+        if not df.empty:
+            return df
+        # Fallback: дневные архивы (для текущего месяца или если месячный 404)
+        days_in_month = calendar.monthrange(yr, mo)[1]
+        max_day = now.day if (yr == now.year and mo == now.month) else days_in_month
+        daily_dfs = []
+        for day in range(1, max_day + 1):
+            date_str = f"{yr}-{mo:02d}-{day:02d}"
+            df_d = download_daily(symbol, interval, date_str, perp)
+            if not df_d.empty:
+                daily_dfs.append(df_d)
+        if daily_dfs:
+            return pd.concat(daily_dfs, ignore_index=True)
+        return pd.DataFrame()
+
     def _fetch_one(args):
         yr, mo = args
-        df = download_monthly(symbol, interval, yr, mo, perp)
+        df = _fetch_month(yr, mo)
         if df.empty:
             return pd.DataFrame()
         df["symbol"] = symbol
