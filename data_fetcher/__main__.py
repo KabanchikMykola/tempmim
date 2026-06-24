@@ -89,6 +89,10 @@ def main():
     # --- stream ---
     p_stream = sub.add_parser("stream", help="Реалтайм WebSocket pipeline")
 
+    # --- exchange-audit ---
+    p_audit = sub.add_parser("exchange-audit", help="Аудит бирж: доступность данных")
+    p_audit.add_argument("--exchanges", nargs="+", help="Список бирж (по умолчанию все)")
+
     args = parser.parse_args()
 
     # --- dispatch ---
@@ -107,6 +111,8 @@ def main():
         _run_symbols(args)
     elif args.command == "stream":
         _run_stream(args)
+    elif args.command == "exchange-audit":
+        _run_exchange_audit(args)
 
 
 def _run_ccxt(args):
@@ -201,6 +207,11 @@ def _run_stream(args):
 
     import asyncio
     asyncio.run(stream_main())
+
+
+def _run_exchange_audit(args):
+    from data_fetcher.ccxt_api.exchange_audit import run_audit
+    run_audit(args.exchanges)
 
 
 if __name__ == "__main__":
