@@ -13,6 +13,7 @@ import zipfile
 import time
 from pathlib import Path
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import pandas as pd
@@ -46,6 +47,13 @@ def download_funding_monthly(symbol, year, month):
     return pd.DataFrame()
 
 
+def _db_max_ts(conn, symbol):
+    result = conn.execute(
+        "SELECT COALESCE(MAX(ts), 0) FROM funding_rates WHERE symbol=?", [symbol]
+    ).fetchone()
+    return result[0] if result else 0
+
+
 def fetch_funding(symbol, years=3, export_parquet=True):
     """Загрузить funding rate для символа. DuckDB кеш + Parquet.
 
@@ -70,35 +78,53 @@ def fetch_funding(symbol, years=3, export_parquet=True):
     """)
 
     existing = conn.execute(
-        "SELECT COUNT(*) FROM funding_rates WHERE symbol=?",
-        [symbol]
+        "SELECT COUNT(*) FROM funding_rates WHERE symbol=?", [symbol]
     ).fetchone()[0]
 
     if existing > 1000:
         df = conn.execute(
-            "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts",
-            [symbol]
+            "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts", [symbol]
         ).fetchdf()
         conn.close()
         return df
 
     now = datetime.now()
+    tasks = []
     for year in range(now.year - years, now.year + 1):
         for month in range(1, 13):
             if year == now.year and month > now.month:
                 break
-            df_m = download_funding_monthly(symbol, year, month)
-            if not df_m.empty:
-                df_m["ts"] = pd.to_numeric(df_m["calc_time"], errors="coerce")
-                conn.execute("""
-                    INSERT INTO funding_rates
-                    SELECT symbol, calc_time, funding_interval_hours, last_funding_rate, ts FROM df_m
-                """)
-        time.sleep(0.2)
+            tasks.append((year, month))
+
+    max_ts = _db_max_ts(conn, symbol)
+    total = 0
+
+    def _fetch_one(yr, mo):
+        df = download_funding_monthly(symbol, yr, mo)
+        if df.empty:
+            return pd.DataFrame()
+        df["ts"] = pd.to_numeric(df["calc_time"], errors="coerce")
+        # только новые строки
+        return df[df["ts"] > max_ts]
+
+    with ThreadPoolExecutor(max_workers=config.VISION_WORKERS) as ex:
+        futures = {ex.submit(_fetch_one, yr, mo): (yr, mo) for yr, mo in tasks}
+        for f in as_completed(futures):
+            try:
+                df = f.result()
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            conn.execute("""
+                INSERT INTO funding_rates
+                SELECT symbol, calc_time, funding_interval_hours, last_funding_rate, ts FROM df
+            """)
+            total += len(df)
+            time.sleep(0.1)  # мягкий лимит, 1 раз на месяц
 
     df = conn.execute(
-        "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts",
-        [symbol]
+        "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts", [symbol]
     ).fetchdf()
     conn.close()
 

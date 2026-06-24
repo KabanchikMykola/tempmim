@@ -57,10 +57,13 @@ def main():
     p_ccxt.add_argument("--bucket", type=str, help="HuggingFace bucket ID (напр. Kabanchik/mimo)")
 
     p_vision = ohlcv_sub.add_parser("vision", help="Из S3 архивов (data.binance.vision)")
-    p_vision.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"], help="Тикеры")
+    p_vision.add_argument("--symbol", nargs="+", help="Тикеры")
+    p_vision.add_argument("--all", action="store_true", help="Все общие спот+перп пары из symbols/")
     p_vision.add_argument("--interval", default="1h", help="Таймфрейм")
     p_vision.add_argument("--years", type=int, default=3, help="Сколько лет")
     p_vision.add_argument("--perp", action="store_true", help="Перпетуалы вместо спота")
+    p_vision.add_argument("--tail", action="store_true", help="Докачать последние бары через REST API")
+    p_vision.add_argument("--tail-only", action="store_true", help="Только последние бары (без S3 истории)")
 
     # --- agg-trades ---
     p_agg = sub.add_parser("agg-trades", help="Исторические aggTrades из S3")
@@ -143,12 +146,35 @@ def _run_ccxt(args):
 
 def _run_vision(args):
     from data_fetcher.binance_vision.fetch_klines import fetch_symbol, summary
+    import json
+
+    if args.all:
+        common_path = Path("symbols/spot_perpetual_common_usdt.json")
+        if not common_path.exists():
+            print("Сначала запусти: python -m data_fetcher symbols")
+            return
+        with open(common_path) as f:
+            data = json.load(f)
+        symbols = [p["symbol"] for p in data["pairs"]]
+        print(f"Загрузка {len(symbols)} символов из {common_path}")
+    elif args.symbol:
+        symbols = args.symbol
+    else:
+        symbols = ["BTCUSDT", "ETHUSDT"]
 
     import time as ttime
     t0 = ttime.time()
-    for symbol in args.symbol:
-        df = fetch_symbol(symbol, args.interval, args.years, args.perp, export_parquet=True)
+    for i, symbol in enumerate(symbols, 1):
         src = "perp" if args.perp else "spot"
+        tail_label = " +tail" if args.tail else ""
+
+        print(f"[{i}/{len(symbols)}] {symbol} ({src}{tail_label})...", flush=True)
+        df, warnings = fetch_symbol(
+            symbol, args.interval, args.years, args.perp,
+            export_parquet=True, tail=args.tail, tail_only=args.tail_only,
+        )
+        for w in warnings:
+            print(f"  {w}")
         print(f"  {symbol} ({src}): {len(df):,} баров")
 
     summary()
