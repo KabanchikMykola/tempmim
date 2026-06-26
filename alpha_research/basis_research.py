@@ -8,14 +8,14 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 TF = "1h"
 
 
 def load_pair(base: str) -> pd.DataFrame | None:
     """Загрузить спот и перп для пары, вернуть merged DataFrame."""
-    spot_file = DATA_DIR / f"{base}_USDT_{TF}.parquet"
-    perp_file = DATA_DIR / f"{base}_USDT_USDT_{TF}.parquet"
+    spot_file = DATA_DIR / f"{base}USDT_{TF}_spot.parquet"
+    perp_file = DATA_DIR / f"{base}USDT_{TF}_perp.parquet"
 
     if not spot_file.exists() or not perp_file.exists():
         return None
@@ -103,8 +103,8 @@ def backtest_basis(df: pd.DataFrame, entry_z: float = 2.0, exit_z: float = 0.5) 
 
 
 def main():
-    files = list(DATA_DIR.glob(f"*_USDT_{TF}.parquet"))
-    bases = sorted(set(f.stem.replace(f"_{TF}", "").replace("_USDT", "") for f in files))
+    files = list(DATA_DIR.glob(f"*_{TF}_spot.parquet"))
+    bases = sorted(set(f.stem.replace(f"_{TF}_spot", "") for f in files))
 
     print(f"Basis Research | {len(bases)} пар | {TF}")
     print("=" * 80)

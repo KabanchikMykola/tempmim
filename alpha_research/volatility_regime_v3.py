@@ -8,15 +8,15 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 TF = "1h"
 EXCLUDE = {"USDC"}
 HOLDOUT_DAYS = 14
 
 
 def load_pair(base: str) -> pd.DataFrame | None:
-    spot_file = DATA_DIR / f"{base}_USDT_{TF}.parquet"
-    perp_file = DATA_DIR / f"{base}_USDT_USDT_{TF}.parquet"
+    spot_file = DATA_DIR / f"{base}USDT_{TF}_spot.parquet"
+    perp_file = DATA_DIR / f"{base}USDT_{TF}_perp.parquet"
     if not spot_file.exists() or not perp_file.exists():
         return None
     spot = pd.read_parquet(spot_file)[["timestamp", "open", "close", "high", "low"]].rename(
@@ -204,8 +204,8 @@ def holdout_test(df: pd.DataFrame, holdout_days: int = 14) -> dict:
 
 
 def main():
-    files = list(DATA_DIR.glob(f"*_USDT_{TF}.parquet"))
-    bases = sorted(set(f.stem.replace(f"_{TF}", "").replace("_USDT", "") for f in files) - EXCLUDE)
+    files = list(DATA_DIR.glob(f"*USDT_{TF}_spot.parquet"))
+    bases = sorted(set(f.stem.replace(f"_{TF}_spot", "").removesuffix("USDT") for f in files) - EXCLUDE)
 
     print("VOLATILITY REGIME v3 — Walk-Forward + Holdout + Dynamic Exits")
     print("=" * 95)

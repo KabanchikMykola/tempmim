@@ -8,13 +8,13 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 TF = "1h"
 
 
 def load_pair(base: str) -> pd.DataFrame | None:
-    spot_file = DATA_DIR / f"{base}_USDT_{TF}.parquet"
-    perp_file = DATA_DIR / f"{base}_USDT_USDT_{TF}.parquet"
+    spot_file = DATA_DIR / f"{base}USDT_{TF}_spot.parquet"
+    perp_file = DATA_DIR / f"{base}USDT_{TF}_perp.parquet"
     if not spot_file.exists() or not perp_file.exists():
         return None
     spot = pd.read_parquet(spot_file)[["timestamp", "close"]].rename(columns={"close": "spot"})
@@ -113,8 +113,8 @@ def parameter_sweep(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
-    files = list(DATA_DIR.glob(f"*_USDT_{TF}.parquet"))
-    bases = sorted(set(f.stem.replace(f"_{TF}", "").replace("_USDT", "") for f in files))
+    files = list(DATA_DIR.glob(f"*_{TF}_spot.parquet"))
+    bases = sorted(set(f.stem.replace(f"_{TF}_spot", "") for f in files))
 
     print("WALK-FORWARD BASIS ANALYSIS")
     print("=" * 80)

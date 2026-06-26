@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 TF = "1h"
 EXCLUDE = {"USDC"}
 HOLDOUT_DAYS = 14
@@ -17,12 +17,12 @@ WF_TEST = 7 * 24 * 3600000
 
 
 def load_all():
-    files = list(DATA_DIR.glob(f"*_{TF}.parquet"))
-    bases = sorted(set(f.stem.replace(f"_{TF}", "").replace("_USDT", "") for f in files) - EXCLUDE)
+    files = list(DATA_DIR.glob(f"*_{TF}_spot.parquet"))
+    bases = sorted(set(f.stem.replace(f"_{TF}_spot", "").removesuffix("USDT") for f in files) - EXCLUDE)
     data = {}
     for base in bases:
-        spot_f = DATA_DIR / f"{base}_USDT_{TF}.parquet"
-        perp_f = DATA_DIR / f"{base}_USDT_USDT_{TF}.parquet"
+        spot_f = DATA_DIR / f"{base}USDT_{TF}_spot.parquet"
+        perp_f = DATA_DIR / f"{base}USDT_{TF}_perp.parquet"
         if not spot_f.exists() or not perp_f.exists():
             continue
         spot = pd.read_parquet(spot_f)

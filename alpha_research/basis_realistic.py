@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 TF = "1h"
 
 # Реальные издержки Binance
@@ -18,8 +18,8 @@ FUNDING_RATE_AVG = 0.0001    # ~0.01% каждые 8h (средний)
 
 
 def load_pair(base: str) -> pd.DataFrame | None:
-    spot_file = DATA_DIR / f"{base}_USDT_{TF}.parquet"
-    perp_file = DATA_DIR / f"{base}_USDT_USDT_{TF}.parquet"
+    spot_file = DATA_DIR / f"{base}USDT_{TF}_spot.parquet"
+    perp_file = DATA_DIR / f"{base}USDT_{TF}_perp.parquet"
     if not spot_file.exists() or not perp_file.exists():
         return None
     spot = pd.read_parquet(spot_file)[["timestamp", "close"]].rename(columns={"close": "spot"})
@@ -136,8 +136,8 @@ def backtest_realistic(df: pd.DataFrame, entry_z: float = 2.0, exit_z: float = 0
 
 
 def main():
-    files = list(DATA_DIR.glob(f"*_USDT_{TF}.parquet"))
-    bases = sorted(set(f.stem.replace(f"_{TF}", "").replace("_USDT", "") for f in files))
+    files = list(DATA_DIR.glob(f"*_{TF}_spot.parquet"))
+    bases = sorted(set(f.stem.replace(f"_{TF}_spot", "") for f in files))
 
     print("BASIS STRATEGY — REALISTIC COSTS")
     print(f"Комиссия: {COMMISSION_PCT}% × 2 (вход+выход) × 2 (спот+перп)")

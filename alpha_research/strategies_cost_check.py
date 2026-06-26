@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 WF_TRAIN = 30 * 24 * 3600000
 WF_TEST = 7 * 24 * 3600000
 HOLDOUT_DAYS = 14
@@ -14,8 +14,8 @@ COST_PCT = 0.08 + 0.02  # 0.08% commission + 0.02% slippage = 0.10% round trip
 
 
 def load_pair(base):
-    sf = DATA_DIR / f"{base}_USDT_1h.parquet"
-    pf = DATA_DIR / f"{base}_USDT_USDT_1h.parquet"
+    sf = DATA_DIR / f"{base}USDT_1h_spot.parquet"
+    pf = DATA_DIR / f"{base}USDT_1h_perp.parquet"
     if not sf.exists() or not pf.exists(): return None
     s = pd.read_parquet(sf)[["timestamp","close"]].rename(columns={"close":"spot"})
     p = pd.read_parquet(pf)[["timestamp","close"]].rename(columns={"close":"perp"})
