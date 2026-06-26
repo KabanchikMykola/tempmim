@@ -47,8 +47,29 @@ python -m data_fetcher ohlcv ccxt --common --upload --bucket Kabanchik/mimo
 
 ## Data
 
-- Parquet files in `data/`. Naming: `{SYMBOL}_{TF}_{type}.parquet` (e.g. `BTCUSDT_1h_spot.parquet`).
-- DuckDB cache: `data/cache/binance_vision.db` (used by binance_vision fetchers).
+- **Корневая папка:** `fin_data/` (вместо `data/`)
+- **Bucket prefix:** `fin_data/` на HF
+
+### Структура
+
+```
+fin_data/
+├── binance/
+│   ├── ohlcv_spot/
+│   │   ├── BTCUSDT_1h_2025.parquet     ← годовые партиции
+│   │   ├── BTCUSDT_1h_2026.parquet     ← только этот перезаписывается при tail
+│   │   └── ...
+│   ├── ohlcv_perp/
+│   │   └── ...
+│   ├── funding/
+│   │   └── BTCUSDT_funding.parquet
+│   └── metrics/
+│       └── BTCUSDT_metrics.parquet
+├── bybit/    ← future
+└── yfinance/ ← future
+```
+
+- DuckDB cache: `fin_data/cache/binance_vision.db`
 - `symbols/` has pre-fetched Binance symbol lists (JSON).
 - `data/top5_2026/` is expected by alpha_research scripts but **not in repo** (gitignored `data/`).
 
@@ -138,6 +159,12 @@ python alpha_research/strategies_basis.py
 - OHLC consistency: high >= low >= open/close.
 - Гэпы > 1.5x интервал детектятся и выводятся.
 
+### Data Contracts
+- `data_fetcher/contracts.py` — валидация по контракту для OHLCV, funding, metrics
+- Каждый тип данных имеет: схему (типы, nullability), правила качества (high >= low, volume >= 0), проверку монотонности timestamp
+- Вызывается автоматически в каждом fetcher-е после загрузки
+- Контракт гарантирует одинаковую схему независимо от источника (Binance, Bybit, yfinance)
+
 ### DuckDB caveats
 - INSERT в `klines` использует **явные имена колонок**, не `SELECT *` — порядок колонок в DataFrame не совпадает с таблицей.
 - `_db_insert_batch` фильтрует `df[df["ts"] > max_ts]` — дедупликация при повторном запуске.
@@ -160,23 +187,8 @@ No test suite, linting, or CI config exists. Run `uv run python -m data_fetcher 
 
 ## External storage
 
-- HuggingFace Bucket: `hf://buckets/Kabanchik/mimo/data/`
+- HuggingFace Bucket: `hf://buckets/Kabanchik/mimo/fin_data/`
 - Upload: `upload_to_bucket(Path("data"), "Kabanchik/mimo")`
-
-## HF Bucket как единое хранилище (ПЛАН)
-
-Сейчас только `fetch_metrics.py` читает из HF Bucket. OHLCV (`fetch_klines.py`) и funding (`fetch_funding.py`) — нет.
-
-**Цель:** единая логика для всех fetcher-ов:
-```
-HF Bucket → локальный parquet → DuckDB → S3 → запись в parquet → sync в bucket
-```
-
-### Что сделать:
-1. **`fetch_klines.py`** — добавить чтение из HF Bucket первой очередью (как в `fetch_metrics.py`)
-2. **`fetch_funding.py`** — то же самое
-3. **Автоматическая запись в bucket** после каждой загрузки (сейчас только `fetch_metrics` пишет)
-4. **Унифицировать логику кеширования** во всех трёх fetcher-ах
 
 ### Установленные инструменты
 - `hf` CLI v1.21.0 (`C:\Trad_proj\mimo_code\.venv\Scripts\hf.exe`)
@@ -196,6 +208,14 @@ HF Bucket → локальный parquet → DuckDB → S3 → запись в p
 - `data_fetcher/binance_vision/fetch_funding.py` — то же самое (HF Bucket → Parquet → DuckDB → S3 → sync)
 - Установлен `hf` CLI v1.21.0, login через `hf auth login`
 - `hf skills add --global` — skill для OpenCode
+
+**Коммит e5bb611:**
+- `data_fetcher/binance_vision/fetch_klines.py` — пути `fin_data/binance/ohlcv_{spot|perp}/`, годовой суффикс, `validate_ohlcv` из `contracts.py`
+- `data_fetcher/binance_vision/fetch_funding.py` — пути `fin_data/binance/funding/`
+- `data_fetcher/binance_vision/fetch_metrics.py` — пути `fin_data/binance/metrics/`
+- `data_fetcher/config.py` — `DATA_DIR = Path("fin_data")`, helpers `ohlcv_path()`, `funding_path()`, `metrics_path()`
+- `data_fetcher/contracts.py` — **новый**: Data Contracts для OHLCV/funding/metrics
+- `AGENTS.md` — обновлена структура данных
 
 ### Запуск на других ПК
 После первого клонирования репо на новом ПК:

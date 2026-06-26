@@ -25,6 +25,7 @@ import pandas as pd
 import duckdb
 
 from data_fetcher import config
+from data_fetcher.contracts import validate_ohlcv
 
 # ── Timestamp helpers ────────────────────────────────────────────
 
@@ -61,70 +62,6 @@ def _normalize_timestamps(df):
     return df
 
 
-def _validate_ohlcv(df, interval="1h", silent=False):
-    """Проверить и почистить скачанные OHLCV данные.
-
-    Returns:
-        (df_clean, warnings) — DataFrame и список строк-предупреждений.
-    """
-    warnings = []
-    if df.empty:
-        return df, warnings
-
-    before = len(df)
-
-    # 1. Удалить zero-volume строки (техобслуживание биржи)
-    df = df[df["volume"] > 0].copy()
-    dropped = before - len(df)
-    if dropped > 0:
-        msg = f"    {dropped} zero-volume строк удалено"
-        warnings.append(msg)
-
-    if df.empty:
-        return df, warnings
-
-    # 2. Удалить дубликаты по ts
-    before = len(df)
-    df = df.drop_duplicates(subset=["ts"])
-    dropped = before - len(df)
-    if dropped > 0:
-        msg = f"    {dropped} дубликатов удалено"
-        warnings.append(msg)
-
-    # 3. Сортировка
-    df = df.sort_values("ts").reset_index(drop=True)
-
-    # 4. OHLC consistency
-    bad = (
-        (df["high"] < df["low"])
-        | (df["high"] < df["open"])
-        | (df["high"] < df["close"])
-        | (df["low"] > df["open"])
-        | (df["low"] > df["close"])
-    )
-    if bad.any():
-        msg = f"    OHLC inconsistency: {bad.sum()} строк"
-        warnings.append(msg)
-
-    # 5. Негативные цены
-    for col in ("open", "high", "low", "close"):
-        if (df[col] <= 0).any():
-            msg = f"    {col} <= 0: {(df[col] <= 0).sum()} строк"
-            warnings.append(msg)
-
-    # 6. Проверка на пропуски (gaps) — только если > 2 строк
-    if len(df) > 2:
-        tf_ms = {"1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000,
-                 "4h": 14400000, "1d": 86400000}
-        expected = tf_ms.get(interval, 3600000)
-        gaps = (df["ts"].diff() > expected * 1.5).sum()
-        if gaps > 0:
-            msg = f"    Гэпов (>1.5x интервал): {gaps}"
-            warnings.append(msg)
-
-    return df, warnings
-
-
 # ── Binance REST API tail ────────────────────────────────────────
 
 
@@ -138,46 +75,76 @@ def _db_path():
     return Path(config.CACHE_DIR) / "binance_vision.db"
 
 
-def _parquet_path(symbol, interval, source):
-    return Path(config.DATA_DIR) / f"{symbol}_{interval}_{source}.parquet"
+def _parquet_path(symbol, interval, source, year=None):
+    """Годовой parquet: fin_data/binance/ohlcv_spot/BTCUSDT_1h_2025.parquet."""
+    return config.ohlcv_path(symbol, interval, source, year)
 
 
-def _bucket_parquet_uri(symbol, interval, source):
-    return f"hf://buckets/{config.BUCKET_ID}/data/{symbol}_{interval}_{source}.parquet"
+def _bucket_parquet_uri(symbol, interval, source, year):
+    return config.ohlcv_bucket_uri(symbol, interval, source, year)
+
+
+def _read_all_years(symbol, interval, source):
+    """Прочитать все годовые parquet для символа, склеить в один DataFrame."""
+    import glob as pyglob
+    pattern = config.ohlcv_pattern(symbol, interval, source)
+    files = sorted(pyglob.glob(pattern))
+    if not files:
+        return pd.DataFrame()
+    dfs = [_normalize_parquet_on_read(Path(f)) for f in files]
+    dfs = [d for d in dfs if not d.empty]
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True).sort_values("ts").reset_index(drop=True)
 
 
 def _sync_from_bucket(symbol, interval, source):
-    """Скачать parquet из bucket в локальный кеш (если есть на HF)."""
+    """Скачать годовые parquet из bucket (если нет локально)."""
     if not config.BUCKET_ID:
         return None
-    pq = _parquet_path(symbol, interval, source)
-    if pq.exists():
-        return None
-    try:
-        uri = _bucket_parquet_uri(symbol, interval, source)
-        df = pd.read_parquet(uri)
-        if df.empty:
-            return None
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(pq, index=False)
-        return df
-    except Exception as e:
-        print(f"  bucket sync error: {e}")
-        return None
+    now = datetime.now(timezone.utc)
+    years = list(range(now.year - 3, now.year + 1))
+    dfs = []
+    for year in years:
+        pq = _parquet_path(symbol, interval, source, year)
+        if pq.exists():
+            continue
+        try:
+            uri = _bucket_parquet_uri(symbol, interval, source, year)
+            df = pd.read_parquet(uri)
+            if not df.empty:
+                pq.parent.mkdir(parents=True, exist_ok=True)
+                df.to_parquet(pq, index=False)
+                dfs.append(df)
+        except Exception:
+            pass
+    if dfs:
+        return pd.concat(dfs, ignore_index=True).sort_values("ts").reset_index(drop=True)
+    return None
 
 
 def _sync_to_bucket(symbol, interval, source, df=None):
-    """Загрузить локальный parquet в bucket."""
+    """Загрузить годовые parquet в bucket."""
     if not config.BUCKET_ID:
         return
     try:
-        if df is None:
-            pq = _parquet_path(symbol, interval, source)
-            if not pq.exists():
-                return
-            df = pd.read_parquet(pq)
-        uri = _bucket_parquet_uri(symbol, interval, source)
-        df.to_parquet(uri, index=False)
+        if df is not None and not df.empty:
+            df = df.copy()
+            df["_year"] = pd.to_datetime(df["ts"], unit="ms").dt.year
+            for year in df["_year"].unique():
+                ydf = df[df["_year"] == year].drop(columns=["_year"])
+                pq = _parquet_path(symbol, interval, source, year)
+                pq.parent.mkdir(parents=True, exist_ok=True)
+                ydf.to_parquet(pq, index=False)
+                uri = _bucket_parquet_uri(symbol, interval, source, year)
+                ydf.to_parquet(uri, index=False)
+        else:
+            now = datetime.now(timezone.utc)
+            for year in range(now.year - 3, now.year + 1):
+                pq = _parquet_path(symbol, interval, source, year)
+                if pq.exists():
+                    uri = _bucket_parquet_uri(symbol, interval, source, year)
+                    pd.read_parquet(pq).to_parquet(uri, index=False)
     except Exception as e:
         print(f"  bucket sync error: {e}")
 
@@ -309,15 +276,19 @@ def _db_insert_batch(conn, df):
 
 
 def _export_to_parquet(conn, symbol, source, interval):
-    """Экспортировать данные из DuckDB в Parquet с колонкой timestamp."""
-    pq = _parquet_path(symbol, interval, source)
+    """Экспортировать данные из DuckDB в годовые Parquet."""
     df = conn.execute(
         "SELECT *, ts AS timestamp FROM klines WHERE symbol=? AND source=? AND interval=? ORDER BY ts",
         [symbol, source, interval],
     ).fetchdf()
-    if not df.empty:
+    if df.empty:
+        return df
+    df["_year"] = pd.to_datetime(df["ts"], unit="ms").dt.year
+    for year in df["_year"].unique():
+        ydf = df[df["_year"] == year].drop(columns=["_year"])
+        pq = _parquet_path(symbol, interval, source, year)
         pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(pq, index=False)
+        ydf.to_parquet(pq, index=False)
     return df
 
 
@@ -381,9 +352,16 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
         (pd.DataFrame, warnings) — данные и список предупреждений.
     """
     source = "perp" if perp else "spot"
-    pq = _parquet_path(symbol, interval, source)
     db = _db_path()
     all_warnings = []
+
+    # ── helpers для работы с годовыми файлами ──
+    def _cur_year_pq():
+        return _parquet_path(symbol, interval, source, datetime.now(timezone.utc).year)
+
+    def _has_any_years():
+        import glob as pyglob
+        return len(pyglob.glob(config.ohlcv_pattern(symbol, interval, source))) > 0
 
     # ── tail_only: только REST API, без S3 и кеша ──
     if tail_only:
@@ -393,30 +371,28 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
         tail_df["symbol"] = symbol
         tail_df["source"] = source
         tail_df["interval"] = interval
-        tail_df, tw = _validate_ohlcv(tail_df, interval)
+        tail_df, tw = validate_ohlcv(tail_df, interval)
         all_warnings.extend(tw)
         if export_parquet:
-            pq.parent.mkdir(parents=True, exist_ok=True)
-            # Мерж с существующим parquet если есть (не перезаписывать!)
-            if pq.exists():
-                old = _normalize_parquet_on_read(pq)
+            cur = _cur_year_pq()
+            cur.parent.mkdir(parents=True, exist_ok=True)
+            if _has_any_years():
+                old = _read_all_years(symbol, interval, source)
                 old_new = old[old["ts"] < tail_df["ts"].min()]
                 merged = pd.concat([old_new, tail_df], ignore_index=True)
                 merged = merged.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
                 merged["timestamp"] = merged["ts"]
-                merged.to_parquet(pq, index=False)
                 _sync_to_bucket(symbol, interval, source, merged)
                 n_new = len(merged) - len(old_new)
                 if n_new > 0:
                     all_warnings.append(f"   tail: +{n_new} баров (мерж с существующими)")
                 return merged, all_warnings
             tail_df["timestamp"] = tail_df["ts"]
-            tail_df.to_parquet(pq, index=False)
             _sync_to_bucket(symbol, interval, source, tail_df)
         return tail_df, all_warnings
 
     # ── 1. Загрузить из bucket в локальный кеш ──
-    if config.BUCKET_ID and not pq.exists():
+    if config.BUCKET_ID and not _has_any_years():
         bucket_df = _sync_from_bucket(symbol, interval, source)
         if bucket_df is not None and len(bucket_df) > 1000:
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -425,16 +401,15 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
             if staleness_days < 2:
                 return bucket_df, all_warnings
 
-    # ── 2. Проверить Parquet с авто-нормализацией старых данных ──
-    if pq.exists():
-        df = _normalize_parquet_on_read(pq)
+    # ── 2. Проверить годовые Parquet ──
+    if _has_any_years():
+        df = _read_all_years(symbol, interval, source)
         if len(df) > 1000:
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             max_ts = df["ts"].max()
             staleness_days = (now_ms - max_ts) / 86400000
 
             if staleness_days < 2:
-                # Данные свежие — опционально докинуть только tail
                 if tail:
                     tail_df = fetch_tail(symbol, interval, perp)
                     if not tail_df.empty and tail_df["ts"].max() > max_ts:
@@ -447,12 +422,10 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
                             df = df.drop_duplicates(subset=["ts"]).sort_values("ts")
                             df = df.reset_index(drop=True)
                             df["timestamp"] = df["ts"]
-                            df.to_parquet(pq, index=False)
                             _sync_to_bucket(symbol, interval, source, df)
                             all_warnings.append(f"   tail: +{len(tail_new)} баров от API")
                 return df, all_warnings
 
-            # Данные устарели — нужно докачать недостающие месяцы с S3
             all_warnings.append(f"   кеш устарел на {staleness_days:.0f}д — докачка")
 
     # ── 3. Подготовить DuckDB ──
@@ -544,16 +517,14 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
     ).fetchdf()
 
     if validate and not df.empty:
-        df, vw = _validate_ohlcv(df, interval)
+        df, vw = validate_ohlcv(df, interval)
         all_warnings.extend(vw)
 
-    conn.close()
-
     if export_parquet and not df.empty:
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        df["timestamp"] = df["ts"]
-        df.to_parquet(pq, index=False)
+        _export_to_parquet(conn, symbol, source, interval)
         _sync_to_bucket(symbol, interval, source, df)
+
+    conn.close()
 
     return df, all_warnings
 
@@ -572,8 +543,7 @@ def export_all():
         "SELECT DISTINCT symbol, source, interval FROM klines"
     ).fetchall()
     for symbol, source, interval in rows:
-        pq = _parquet_path(symbol, interval, source)
-        print(f"  Экспорт {symbol} {source} {interval} -> {pq}")
+        print(f"  Экспорт {symbol} {source} {interval}")
         _export_to_parquet(conn, symbol, source, interval)
     conn.close()
 

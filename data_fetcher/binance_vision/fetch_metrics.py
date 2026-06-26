@@ -29,6 +29,7 @@ import pandas as pd
 import duckdb
 
 from data_fetcher import config
+from data_fetcher.contracts import validate_metrics
 
 # ── Константы ────────────────────────────────────────────────────
 
@@ -54,13 +55,13 @@ def _db_path():
 
 
 def _parquet_path(symbol):
-    """Локальный путь к parquet (для DuckDB и кеша)."""
-    return Path(config.DATA_DIR) / f"{symbol}_metrics.parquet"
+    """Путь к parquet: fin_data/binance/metrics/{symbol}_metrics.parquet."""
+    return config.metrics_path(symbol)
 
 
 def _bucket_parquet_uri(symbol):
     """URI к parquet в HuggingFace Bucket."""
-    return f"hf://buckets/{config.BUCKET_ID}/data/{symbol}_metrics.parquet"
+    return config.metrics_bucket_uri(symbol)
 
 
 # ── DuckDB helpers ───────────────────────────────────────────────
@@ -322,7 +323,7 @@ def fetch_metrics(symbol, years=3, export_parquet=True, force=False):
         ).fetchdf()
         conn.close()
         if not df.empty:
-            df, vw = _validate_metrics(df)
+            df, vw = validate_metrics(df)
             all_warnings.extend(vw)
         if export_parquet and not df.empty:
             pq.parent.mkdir(parents=True, exist_ok=True)
@@ -381,7 +382,7 @@ def fetch_metrics(symbol, years=3, export_parquet=True, force=False):
     conn.close()
 
     if not df.empty:
-        df, vw = _validate_metrics(df)
+        df, vw = validate_metrics(df)
         all_warnings.extend(vw)
 
     if export_parquet and not df.empty:

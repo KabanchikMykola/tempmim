@@ -23,6 +23,7 @@ import pandas as pd
 import duckdb
 
 from data_fetcher import config
+from data_fetcher.contracts import validate_funding
 
 
 def _db_path():
@@ -30,11 +31,11 @@ def _db_path():
 
 
 def _parquet_path_funding(symbol):
-    return Path(config.DATA_DIR) / f"{symbol}_funding.parquet"
+    return config.funding_path(symbol)
 
 
 def _bucket_parquet_uri(symbol):
-    return f"hf://buckets/{config.BUCKET_ID}/data/{symbol}_funding.parquet"
+    return config.funding_bucket_uri(symbol)
 
 
 def _sync_from_bucket(symbol):
@@ -187,6 +188,9 @@ def fetch_funding(symbol, years=3, export_parquet=True):
         "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts", [symbol]
     ).fetchdf()
     conn.close()
+
+    if not df.empty:
+        df, vw = validate_funding(df)
 
     if export_parquet and not df.empty:
         pq.parent.mkdir(parents=True, exist_ok=True)
