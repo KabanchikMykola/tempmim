@@ -9,7 +9,8 @@ Cross-exchange crypto data fetcher and alpha research toolkit. Fetches OHLCV (sp
 Uses `uv`. Lockfile: `uv.lock`. Python >= 3.12.
 
 ```sh
-uv sync
+uv sync                    # основные зависимости (без ML)
+uv sync --extra ml         # + ML (lightgbm, optuna, neuralforecast → torch)
 ```
 
 ## CLI
