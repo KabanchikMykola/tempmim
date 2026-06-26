@@ -14,10 +14,11 @@ dependencies = [
     "statsmodels>=0.14.0",
     "xgboost>=3.2.0",
     "scikit-learn>=1.9.0",
-    "requests>=2.31.0",    "lightgbm>=4.0.0",
+    "requests>=2.31.0",
+    "lightgbm>=4.0.0",
     "optuna>=4.0.0",
     "neuralforecast>=1.6.0",
-]  
+]
 
 [tool.setuptools.packages.find]
 include = ["data_fetcher*"]

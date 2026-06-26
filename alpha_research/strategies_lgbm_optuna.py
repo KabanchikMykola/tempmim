@@ -20,7 +20,7 @@ from sklearn.metrics import accuracy_score, f1_score
 warnings.filterwarnings("ignore")
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-DATA_DIR = Path("data/top5_2026")
+DATA_DIR = Path("data")
 RESULTS_FILE = Path("alpha_research/strategies.json")
 
 WF_TRAIN = 30 * 24 * 3600000  # 30 дней
@@ -35,12 +35,12 @@ FEATURES = [
 
 
 def load_all():
-    files = list(DATA_DIR.glob("*_1h.parquet"))
-    bases = sorted(set(f.stem.replace("_1h", "").replace("_USDT", "") for f in files) - {"USDC"})
+    spot_files = sorted(DATA_DIR.glob("*_1h_spot.parquet"))
+    bases = sorted(set(f.stem.replace("_1h_spot", "") for f in spot_files))
     all_dfs = []
     for base in bases:
-        sf = DATA_DIR / f"{base}_USDT_1h.parquet"
-        pf = DATA_DIR / f"{base}_USDT_USDT_1h.parquet"
+        sf = DATA_DIR / f"{base}_1h_spot.parquet"
+        pf = DATA_DIR / f"{base}_1h_perp.parquet"
         if not sf.exists() or not pf.exists():
             continue
         s = pd.read_parquet(sf).rename(columns={"close": "spot", "high": "high_", "low": "low_", "volume": "vol_"})

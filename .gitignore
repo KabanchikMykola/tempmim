@@ -19,6 +19,7 @@ Thumbs.db
 
 # Old/trash
 old_trash/
+[!]old_trash/
 
 # Extracted source — already migrated to data_fetcher/
 another_google_cloud_project/
