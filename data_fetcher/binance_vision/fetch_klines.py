@@ -142,6 +142,46 @@ def _parquet_path(symbol, interval, source):
     return Path(config.DATA_DIR) / f"{symbol}_{interval}_{source}.parquet"
 
 
+def _bucket_parquet_uri(symbol, interval, source):
+    return f"hf://buckets/{config.BUCKET_ID}/data/{symbol}_{interval}_{source}.parquet"
+
+
+def _sync_from_bucket(symbol, interval, source):
+    """Скачать parquet из bucket в локальный кеш (если есть на HF)."""
+    if not config.BUCKET_ID:
+        return None
+    pq = _parquet_path(symbol, interval, source)
+    if pq.exists():
+        return None
+    try:
+        uri = _bucket_parquet_uri(symbol, interval, source)
+        df = pd.read_parquet(uri)
+        if df.empty:
+            return None
+        pq.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(pq, index=False)
+        return df
+    except Exception as e:
+        print(f"  bucket sync error: {e}")
+        return None
+
+
+def _sync_to_bucket(symbol, interval, source, df=None):
+    """Загрузить локальный parquet в bucket."""
+    if not config.BUCKET_ID:
+        return
+    try:
+        if df is None:
+            pq = _parquet_path(symbol, interval, source)
+            if not pq.exists():
+                return
+            df = pd.read_parquet(pq)
+        uri = _bucket_parquet_uri(symbol, interval, source)
+        df.to_parquet(uri, index=False)
+    except Exception as e:
+        print(f"  bucket sync error: {e}")
+
+
 def download_monthly(symbol, interval, year, month, perp=False):
     """Скачать один месячный архив klines с data.binance.vision."""
     src = "futures/um" if perp else "spot"
@@ -365,15 +405,27 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
                 merged = merged.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
                 merged["timestamp"] = merged["ts"]
                 merged.to_parquet(pq, index=False)
+                _sync_to_bucket(symbol, interval, source, merged)
                 n_new = len(merged) - len(old_new)
                 if n_new > 0:
                     all_warnings.append(f"   tail: +{n_new} баров (мерж с существующими)")
                 return merged, all_warnings
             tail_df["timestamp"] = tail_df["ts"]
             tail_df.to_parquet(pq, index=False)
+            _sync_to_bucket(symbol, interval, source, tail_df)
         return tail_df, all_warnings
 
-    # ── 1. Проверить Parquet с авто-нормализацией старых данных ──
+    # ── 1. Загрузить из bucket в локальный кеш ──
+    if config.BUCKET_ID and not pq.exists():
+        bucket_df = _sync_from_bucket(symbol, interval, source)
+        if bucket_df is not None and len(bucket_df) > 1000:
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            max_ts = bucket_df["ts"].max()
+            staleness_days = (now_ms - max_ts) / 86400000
+            if staleness_days < 2:
+                return bucket_df, all_warnings
+
+    # ── 2. Проверить Parquet с авто-нормализацией старых данных ──
     if pq.exists():
         df = _normalize_parquet_on_read(pq)
         if len(df) > 1000:
@@ -396,13 +448,14 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
                             df = df.reset_index(drop=True)
                             df["timestamp"] = df["ts"]
                             df.to_parquet(pq, index=False)
+                            _sync_to_bucket(symbol, interval, source, df)
                             all_warnings.append(f"   tail: +{len(tail_new)} баров от API")
                 return df, all_warnings
 
             # Данные устарели — нужно докачать недостающие месяцы с S3
             all_warnings.append(f"   кеш устарел на {staleness_days:.0f}д — докачка")
 
-    # ── 2. Подготовить DuckDB ──
+    # ── 3. Подготовить DuckDB ──
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db))
     _init_duckdb(conn)
@@ -410,7 +463,7 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
     existing_count = _db_count(conn, symbol, source, interval)
     db_max = _db_max_ts(conn, symbol, source, interval)
 
-    # ── 3. Определить какие месяцы нужно скачать ──
+    # ── 4. Определить какие месяцы нужно скачать ──
     if db_max > 0 and existing_count > 1000:
         # Есть данные в DuckDB — качаем только начиная с db_max
         from datetime import datetime as dt
@@ -433,7 +486,7 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
         conn.close()
         return df, all_warnings
 
-    # ── 4. Скачать с S3 параллельно ──
+    # ── 5. Скачать с S3 параллельно ──
     import calendar
 
     now = datetime.now(timezone.utc)
@@ -472,7 +525,7 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
             n = _db_insert_batch(conn, df)
             total_inserted += n
 
-    # ── 5. Tail через REST API ──
+    # ── 6. Tail через REST API ──
     if tail:
         tail_df = fetch_tail(symbol, interval, perp)
         if not tail_df.empty:
@@ -484,7 +537,7 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
                 all_warnings.append(f"   tail API: +{n} баров")
             total_inserted += n
 
-    # ── 6. Выгрузить результат ──
+    # ── 7. Выгрузить результат ──
     df = conn.execute(
         "SELECT * FROM klines WHERE symbol=? AND source=? AND interval=? ORDER BY ts",
         [symbol, source, interval],
@@ -500,6 +553,7 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
         pq.parent.mkdir(parents=True, exist_ok=True)
         df["timestamp"] = df["ts"]
         df.to_parquet(pq, index=False)
+        _sync_to_bucket(symbol, interval, source, df)
 
     return df, all_warnings
 

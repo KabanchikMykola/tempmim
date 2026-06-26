@@ -3,6 +3,9 @@
 Фандинг: месячные архивы (fundingRate).
 Перп klines — в fetch_klines.py (тот же скрипт что и спот).
 
+Кеш: HuggingFace Bucket → Parquet (data/) → DuckDB (data/cache/) → S3 (data.binance.vision).
+Если BUCKET_ID задан в config.py — синхронизация с HuggingFace Bucket.
+
 Использование:
     python -m data_fetcher funding --symbol BTCUSDT
     python -m data_fetcher funding --symbol ETHUSDT --years 2
@@ -30,6 +33,46 @@ def _parquet_path_funding(symbol):
     return Path(config.DATA_DIR) / f"{symbol}_funding.parquet"
 
 
+def _bucket_parquet_uri(symbol):
+    return f"hf://buckets/{config.BUCKET_ID}/data/{symbol}_funding.parquet"
+
+
+def _sync_from_bucket(symbol):
+    """Скачать parquet из bucket в локальный кеш."""
+    if not config.BUCKET_ID:
+        return None
+    pq = _parquet_path_funding(symbol)
+    if pq.exists():
+        return None
+    try:
+        uri = _bucket_parquet_uri(symbol)
+        df = pd.read_parquet(uri)
+        if df.empty:
+            return None
+        pq.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(pq, index=False)
+        return df
+    except Exception as e:
+        print(f"  bucket sync error: {e}")
+        return None
+
+
+def _sync_to_bucket(symbol, df=None):
+    """Загрузить локальный parquet в bucket."""
+    if not config.BUCKET_ID:
+        return
+    try:
+        if df is None:
+            pq = _parquet_path_funding(symbol)
+            if not pq.exists():
+                return
+            df = pd.read_parquet(pq)
+        uri = _bucket_parquet_uri(symbol)
+        df.to_parquet(uri, index=False)
+    except Exception as e:
+        print(f"  bucket sync error: {e}")
+
+
 def download_funding_monthly(symbol, year, month):
     """Скачать месячный архив funding rate."""
     url = (f"https://data.binance.vision/data/futures/um/monthly/fundingRate/"
@@ -55,7 +98,9 @@ def _db_max_ts(conn, symbol):
 
 
 def fetch_funding(symbol, years=3, export_parquet=True):
-    """Загрузить funding rate для символа. DuckDB кеш + Parquet.
+    """Загрузить funding rate для символа.
+
+    Кеш: HuggingFace Bucket → Parquet (data/) → DuckDB (data/cache/) → S3 (data.binance.vision).
 
     Args:
         symbol: Тикер (BTCUSDT, ETHUSDT...)
@@ -65,10 +110,24 @@ def fetch_funding(symbol, years=3, export_parquet=True):
     Returns:
         pd.DataFrame с колонками symbol, calc_time, funding_interval_hours, last_funding_rate
     """
-    db = _db_path()
     pq = _parquet_path_funding(symbol)
-    db.parent.mkdir(parents=True, exist_ok=True)
+    db = _db_path()
+    all_warnings = []
 
+    # ── 1. Загрузить из bucket в локальный кеш ──
+    if config.BUCKET_ID and not pq.exists():
+        bucket_df = _sync_from_bucket(symbol)
+        if bucket_df is not None and len(bucket_df) > 1000:
+            return bucket_df
+
+    # ── 2. Проверить локальный Parquet ──
+    if pq.exists():
+        df = pd.read_parquet(pq)
+        if len(df) > 1000:
+            return df
+
+    # ── 3. DuckDB ──
+    db.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS funding_rates (
@@ -88,6 +147,7 @@ def fetch_funding(symbol, years=3, export_parquet=True):
         conn.close()
         return df
 
+    # ── 4. Скачать с S3 ──
     now = datetime.now()
     tasks = []
     for year in range(now.year - years, now.year + 1):
@@ -104,7 +164,6 @@ def fetch_funding(symbol, years=3, export_parquet=True):
         if df.empty:
             return pd.DataFrame()
         df["ts"] = pd.to_numeric(df["calc_time"], errors="coerce")
-        # только новые строки
         return df[df["ts"] > max_ts]
 
     with ThreadPoolExecutor(max_workers=config.VISION_WORKERS) as ex:
@@ -121,8 +180,9 @@ def fetch_funding(symbol, years=3, export_parquet=True):
                 SELECT symbol, calc_time, funding_interval_hours, last_funding_rate, ts FROM df
             """)
             total += len(df)
-            time.sleep(0.1)  # мягкий лимит, 1 раз на месяц
+            time.sleep(0.1)
 
+    # ── 5. Выгрузить результат ──
     df = conn.execute(
         "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts", [symbol]
     ).fetchdf()
@@ -131,6 +191,7 @@ def fetch_funding(symbol, years=3, export_parquet=True):
     if export_parquet and not df.empty:
         pq.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(pq, index=False)
+        _sync_to_bucket(symbol, df)
 
     return df
 

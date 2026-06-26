@@ -161,3 +161,44 @@ No test suite, linting, or CI config exists. Run `uv run python -m data_fetcher 
 
 - HuggingFace Bucket: `hf://buckets/Kabanchik/mimo/data/`
 - Upload: `upload_to_bucket(Path("data"), "Kabanchik/mimo")`
+
+## HF Bucket как единое хранилище (ПЛАН)
+
+Сейчас только `fetch_metrics.py` читает из HF Bucket. OHLCV (`fetch_klines.py`) и funding (`fetch_funding.py`) — нет.
+
+**Цель:** единая логика для всех fetcher-ов:
+```
+HF Bucket → локальный parquet → DuckDB → S3 → запись в parquet → sync в bucket
+```
+
+### Что сделать:
+1. **`fetch_klines.py`** — добавить чтение из HF Bucket первой очередью (как в `fetch_metrics.py`)
+2. **`fetch_funding.py`** — то же самое
+3. **Автоматическая запись в bucket** после каждой загрузки (сейчас только `fetch_metrics` пишет)
+4. **Унифицировать логику кеширования** во всех трёх fetcher-ах
+
+### Установленные инструменты
+- `hf` CLI v1.21.0 (`C:\Trad_proj\mimo_code\.venv\Scripts\hf.exe`)
+- `hf skills add --global` — skill установлен в `~/.agents/skills/hf-cli/`
+  (виден после перезапуска OpenCode)
+
+### Что уже поправлено
+
+**Коммит 3123fa4:**
+- `pyproject.toml` — форматирование зависимостей
+- `alpha_research/strategies_lgbm_optuna.py` — пути данных совместимы с fetcher-ом (data/ вместо data/top5_2026/, имена *_1h_spot.parquet / *_1h_perp.parquet)
+- `data_fetcher/config.py` — комментарий про env для BUCKET_ID
+- `.gitignore` — добавлен `!old_trash/`
+
+**Текущая сессия:**
+- `data_fetcher/binance_vision/fetch_klines.py` — добавлены `_sync_from_bucket`, `_sync_to_bucket`, проверка HF Bucket первой очередью, авто-sync после загрузки
+- `data_fetcher/binance_vision/fetch_funding.py` — то же самое (HF Bucket → Parquet → DuckDB → S3 → sync)
+- Установлен `hf` CLI v1.21.0, login через `hf auth login`
+- `hf skills add --global` — skill для OpenCode
+
+### Запуск на других ПК
+После первого клонирования репо на новом ПК:
+1. `uv sync` — установить зависимости
+2. `hf auth login` — войти в HuggingFace
+3. `hf skills add --global` — установить skill (опционально)
+4. Запускать fetcher-ы как обычно — они сами подтянут данные из bucket
