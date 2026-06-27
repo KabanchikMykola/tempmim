@@ -1,0 +1,30 @@
+/* Date picker visibility fixes for Darkly theme */
+
+.DateInput_input {
+    background-color: #505050 !important;
+    color: white !important;
+    border: 1px solid #666 !important;
+    font-size: 14px !important;
+    font-family: monospace !important;
+}
+
+.DateInput_input__focused {
+    border-color: #0d6efd !important;
+}
+
+.SingleDatePickerInput {
+    border-radius: 4px !important;
+}
+
+.CalendarDay__selected {
+    background: #0d6efd !important;
+}
+
+.CalendarDay__selected:hover {
+    background: #0b5ed7 !important;
+}
+
+.DayPickerNavigation__leftButton svg,
+.DayPickerNavigation__rightButton svg {
+    fill: white !important;
+}

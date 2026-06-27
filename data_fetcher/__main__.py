@@ -97,6 +97,12 @@ def main():
     p_audit = sub.add_parser("exchange-audit", help="Аудит бирж: доступность данных")
     p_audit.add_argument("--exchanges", nargs="+", help="Список бирж (по умолчанию все)")
 
+    # --- menu ---
+    sub.add_parser("menu", help="Интерактивное меню загрузки")
+
+    # --- webui ---
+    sub.add_parser("webui", help="WEBUI — сканер пар (Dash)")
+
     # --- metrics ---
     p_metrics = sub.add_parser("metrics", help="Derivatives metrics (OI, long/short ratios)")
     p_metrics.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"],
@@ -127,6 +133,10 @@ def main():
         _run_stream(args)
     elif args.command == "exchange-audit":
         _run_exchange_audit(args)
+    elif args.command == "menu":
+        _run_menu(args)
+    elif args.command == "webui":
+        _run_webui(args)
     elif args.command == "metrics":
         _run_metrics(args)
 
@@ -251,6 +261,17 @@ def _run_stream(args):
 def _run_exchange_audit(args):
     from data_fetcher.ccxt_api.exchange_audit import run_audit
     run_audit(args.exchanges)
+
+
+def _run_menu(args):
+    from data_fetcher.menu import main as menu_main
+    menu_main()
+
+
+def _run_webui(args):
+    from webui.app import create_app
+    app = create_app()
+    app.run(debug=True, host="127.0.0.1", port=8051)
 
 
 def _run_metrics(args):

@@ -25,4 +25,4 @@ ml = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["data_fetcher*"]
+include = ["data_fetcher*", "webui*"]
