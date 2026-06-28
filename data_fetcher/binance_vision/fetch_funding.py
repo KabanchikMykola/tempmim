@@ -20,58 +20,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import pandas as pd
-import duckdb
 
 from data_fetcher import config
 from data_fetcher.contracts import validate_funding
-
-
-def _db_path():
-    return Path(config.CACHE_DIR) / "binance_vision.db"
-
-
-def _parquet_path_funding(symbol):
-    return config.funding_path(symbol)
+from data_fetcher.binance_api.tail import tail_funding
 
 
 def _bucket_parquet_uri(symbol):
-    return config.funding_bucket_uri(symbol)
+    return f"{config.BUCKET_URI}/funding/{symbol}_funding.parquet"
 
 
-def _sync_from_bucket(symbol):
-    """Скачать parquet из bucket в локальный кеш."""
+def _load_from_bucket(symbol):
+    """Прочитать funding parquet из bucket."""
     if not config.BUCKET_ID:
-        return None
-    pq = _parquet_path_funding(symbol)
-    if pq.exists():
         return None
     try:
         uri = _bucket_parquet_uri(symbol)
         df = pd.read_parquet(uri)
-        if df.empty:
-            return None
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(pq, index=False)
-        return df
-    except Exception as e:
-        print(f"  bucket sync error: {e}")
+        return df if not df.empty else None
+    except Exception:
         return None
 
 
-def _sync_to_bucket(symbol, df=None):
-    """Загрузить локальный parquet в bucket."""
-    if not config.BUCKET_ID:
+def _upload_to_bucket(symbol, df):
+    """Загрузить funding parquet в bucket."""
+    if df is None or df.empty or not config.BUCKET_ID:
         return
-    try:
-        if df is None:
-            pq = _parquet_path_funding(symbol)
-            if not pq.exists():
-                return
-            df = pd.read_parquet(pq)
-        uri = _bucket_parquet_uri(symbol)
-        df.to_parquet(uri, index=False)
-    except Exception as e:
-        print(f"  bucket sync error: {e}")
+    uri = _bucket_parquet_uri(symbol)
+    df.to_parquet(uri, index=False)
 
 
 def download_funding_monthly(symbol, year, month):
@@ -91,64 +67,42 @@ def download_funding_monthly(symbol, year, month):
     return pd.DataFrame()
 
 
-def _db_max_ts(conn, symbol):
-    result = conn.execute(
-        "SELECT COALESCE(MAX(ts), 0) FROM funding_rates WHERE symbol=?", [symbol]
-    ).fetchone()
-    return result[0] if result else 0
-
-
-def fetch_funding(symbol, years=3, export_parquet=True):
+def fetch_funding(symbol, years=3, tail=True):
     """Загрузить funding rate для символа.
-
-    Кеш: HuggingFace Bucket → Parquet (data/) → DuckDB (data/cache/) → S3 (data.binance.vision).
 
     Args:
         symbol: Тикер (BTCUSDT, ETHUSDT...)
         years: Сколько лет
-        export_parquet: Экспорт в Parquet
+        tail: Докачать хвост через API
 
     Returns:
         pd.DataFrame с колонками symbol, calc_time, funding_interval_hours, last_funding_rate
     """
-    pq = _parquet_path_funding(symbol)
-    db = _db_path()
     all_warnings = []
 
-    # ── 1. Загрузить из bucket в локальный кеш ──
-    if config.BUCKET_ID and not pq.exists():
-        bucket_df = _sync_from_bucket(symbol)
-        if bucket_df is not None and len(bucket_df) > 1000:
-            return bucket_df
+    # ── 1. Загрузить существующие данные из bucket ──
+    existing = _load_from_bucket(symbol)
+    if existing is not None and len(existing) > 1000:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        max_ts = existing["ts"].max()
+        staleness_days = (now_ms - max_ts) / 86400000
 
-    # ── 2. Проверить локальный Parquet ──
-    if pq.exists():
-        df = pd.read_parquet(pq)
-        if len(df) > 1000:
-            return df
+        if staleness_days < 2:
+            if tail:
+                tail_df = tail_funding(symbol, start_time=max_ts + 1, limit=1000)
+                if not tail_df.empty:
+                    tail_new = tail_df[tail_df["ts"] > max_ts]
+                    if not tail_new.empty:
+                        existing = pd.concat([existing, tail_new], ignore_index=True)
+                        existing = existing.sort_values("ts").reset_index(drop=True)
+                        _upload_to_bucket(symbol, existing)
+                        all_warnings.append(f"   tail API: +{len(tail_new)} записей")
+            if all_warnings:
+                for w in all_warnings:
+                    print(w)
+            return existing
 
-    # ── 3. DuckDB ──
-    db.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db))
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS funding_rates (
-            symbol VARCHAR, calc_time BIGINT, funding_interval_hours INTEGER,
-            last_funding_rate DOUBLE, ts BIGINT
-        )
-    """)
-
-    existing = conn.execute(
-        "SELECT COUNT(*) FROM funding_rates WHERE symbol=?", [symbol]
-    ).fetchone()[0]
-
-    if existing > 1000:
-        df = conn.execute(
-            "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts", [symbol]
-        ).fetchdf()
-        conn.close()
-        return df
-
-    # ── 4. Скачать с S3 ──
+    # ── 2. Скачать историю с S3 ──
     now = datetime.now()
     tasks = []
     for year in range(now.year - years, now.year + 1):
@@ -157,8 +111,7 @@ def fetch_funding(symbol, years=3, export_parquet=True):
                 break
             tasks.append((year, month))
 
-    max_ts = _db_max_ts(conn, symbol)
-    total = 0
+    max_ts = existing["ts"].max() if existing is not None and not existing.empty else 0
 
     def _fetch_one(yr, mo):
         df = download_funding_monthly(symbol, yr, mo)
@@ -167,6 +120,7 @@ def fetch_funding(symbol, years=3, export_parquet=True):
         df["ts"] = pd.to_numeric(df["calc_time"], errors="coerce")
         return df[df["ts"] > max_ts]
 
+    s3_dfs = []
     with ThreadPoolExecutor(max_workers=config.VISION_WORKERS) as ex:
         futures = {ex.submit(_fetch_one, yr, mo): (yr, mo) for yr, mo in tasks}
         for f in as_completed(futures):
@@ -176,28 +130,43 @@ def fetch_funding(symbol, years=3, export_parquet=True):
                 continue
             if df.empty:
                 continue
-            conn.execute("""
-                INSERT INTO funding_rates
-                SELECT symbol, calc_time, funding_interval_hours, last_funding_rate, ts FROM df
-            """)
-            total += len(df)
-            time.sleep(0.1)
+            s3_dfs.append(df)
 
-    # ── 5. Выгрузить результат ──
-    df = conn.execute(
-        "SELECT * FROM funding_rates WHERE symbol=? ORDER BY ts", [symbol]
-    ).fetchdf()
-    conn.close()
+    # ── 3. Склеить ──
+    all_dfs = []
+    if existing is not None and not existing.empty:
+        all_dfs.append(existing)
+    all_dfs.extend(s3_dfs)
 
-    if not df.empty:
-        df, vw = validate_funding(df)
+    if not all_dfs:
+        return pd.DataFrame()
 
-    if export_parquet and not df.empty:
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(pq, index=False)
-        _sync_to_bucket(symbol, df)
+    merged = pd.concat(all_dfs, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
 
-    return df
+    # ── 4. Tail ──
+    if tail:
+        max_ts = merged["ts"].max()
+        tail_df = tail_funding(symbol, start_time=max_ts + 1, limit=1000)
+        if not tail_df.empty:
+            tail_new = tail_df[tail_df["ts"] > max_ts]
+            if not tail_new.empty:
+                merged = pd.concat([merged, tail_new], ignore_index=True)
+                merged = merged.sort_values("ts").reset_index(drop=True)
+                all_warnings.append(f"   tail API: +{len(tail_new)} записей")
+
+    # ── 5. Валидация ──
+    if not merged.empty:
+        merged, vw = validate_funding(merged)
+
+    # ── 6. Загрузить в bucket ──
+    _upload_to_bucket(symbol, merged)
+
+    if all_warnings:
+        for w in all_warnings:
+            print(w)
+
+    return merged
 
 
 def main():
@@ -206,12 +175,13 @@ def main():
     parser.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"],
                         help="Тикеры (по умолчанию BTCUSDT ETHUSDT)")
     parser.add_argument("--years", type=int, default=3, help="Сколько лет")
+    parser.add_argument("--tail", action="store_true", help="Докачать хвост через API")
     args = parser.parse_args()
 
     t0 = time.time()
     for symbol in args.symbol:
         print(f"  {symbol}: загрузка funding...", end=" ", flush=True)
-        df = fetch_funding(symbol, args.years)
+        df = fetch_funding(symbol, args.years, tail=args.tail)
         print(f"{len(df):,} записей")
 
     print(f"\n  Время: {time.time()-t0:.1f}s")

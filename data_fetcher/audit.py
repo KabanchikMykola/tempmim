@@ -1,198 +1,187 @@
-"""Аудит данных: проверка качества скачанных OHLCV.
-
-Поддерживает форматы:
-  - ccxt:   {SYMBOL}_{TF}.parquet  (колонки: timestamp, datetime, timeframe)
-  - vision: {SYMBOL}_{TF}_{spot|perp}.parquet  (колонки: ts, interval)
-"""
+"""Аудит данных в HuggingFace Bucket: проверка качества."""
 
 import sys
 import io
 import pandas as pd
-from pathlib import Path
+from datetime import datetime, timezone
+from huggingface_hub import HfFileSystem
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+from data_fetcher import config
+
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding="utf-8")
 
 TF_MS = {"1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000}
+BUCKET_BASE = f"hf://buckets/{config.BUCKET_ID}/{config.BUCKET_PREFIX}/binance"
 
 
-def audit_file(filepath: Path) -> dict:
-    """Проверить один parquet файл. Возвращает dict с проблемами и метриками."""
-    result = {"issues": [], "bars": 0, "start": None, "end": None,
-              "daily_completeness": None, "extreme_returns": None}
-
-    try:
-        df = pd.read_parquet(filepath)
-    except Exception as e:
-        result["issues"].append(f"Не удалось прочитать: {e}")
-        return result
-
-    if df.empty:
-        result["issues"].append("Пустой файл")
-        return result
-
-    result["bars"] = len(df)
-
-    # Определить колонку timestamp (vision → ts, ccxt → timestamp)
-    ts_col = "timestamp" if "timestamp" in df.columns else ("ts" if "ts" in df.columns else None)
-    if ts_col is None:
-        result["issues"].append("Нет колонки timestamp или ts")
-        return result
-
-    ts = df[ts_col].values
-    result["start"] = _fmt_date(ts[0])
-    result["end"] = _fmt_date(ts[-1])
-
-    # Определить колонку timeframe
-    tf_col = "timeframe" if "timeframe" in df.columns else ("interval" if "interval" in df.columns else None)
-    timeframe = df[tf_col].iloc[0] if tf_col else "1h"
-
-    required = ["open", "high", "low", "close", "volume"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        result["issues"].append(f"Нет колонок: {missing}")
-        return result
-
-    if df.isnull().any().any():
-        result["issues"].append(f"NaN: {dict(df.isnull().sum()[df.isnull().sum() > 0])}")
-
-    dups = df.duplicated(subset=[ts_col]).sum()
-    if dups > 0:
-        result["issues"].append(f"Дубликатов: {dups}")
-
-    for col in ["open", "high", "low", "close"]:
-        if (df[col] <= 0).any():
-            result["issues"].append(f"{col} <= 0: {(df[col] <= 0).sum()}")
-
-    if (df["volume"] < 0).any():
-        result["issues"].append(f"volume < 0: {(df['volume'] < 0).sum()}")
-    if (df["low"] > df["high"]).any():
-        result["issues"].append(f"low > high: {(df['low'] > df['high']).sum()}")
-    bad_oh = ((df["open"] > df["high"]) | (df["close"] > df["high"])).any()
-    bad_ol = ((df["open"] < df["low"]) | (df["close"] < df["low"])).any()
-    if bad_oh:
-        result["issues"].append(f"open/close > high")
-    if bad_ol:
-        result["issues"].append(f"open/close < low")
-
-    # Gap detection
-    diffs = pd.Series(ts).diff().dropna()
-    expected = TF_MS.get(timeframe, 3600000)
-    gaps = (diffs > expected * 1.5).sum()
-    if gaps > 0:
-        result["issues"].append(f"Гэпов: {gaps}")
-
-    # Daily completeness
-    if ts_col == "timestamp" or ts_col == "ts":
-        if ts_col in df.columns:
-            dt_col = pd.to_datetime(df[ts_col], unit="ms", utc=True)
-        else:
-            dt_col = None
-        if dt_col is not None:
-            today = pd.Timestamp.now(tz="UTC").date()
-            df_tmp = df.copy()
-            df_tmp["day"] = dt_col.dt.date
-            df_complete = df_tmp[df_tmp["day"] < today]
-            bars_per_day = 24 if timeframe == "1h" else 6 if timeframe == "4h" else 1 if timeframe == "1d" else 24
-            daily = df_complete.groupby("day").size()
-            incomplete = daily[daily < bars_per_day * 0.8]
-            if len(incomplete) > 0:
-                result["daily_completeness"] = {str(k): int(v) for k, v in incomplete.items()}
-                result["issues"].append(f"Неполных дней: {len(incomplete)}")
-
-    if "close" in df.columns and len(df) > 1:
-        rets = df["close"].pct_change().dropna()
-        top_abs = rets.abs().nlargest(5)
-        if len(top_abs) > 0 and top_abs.iloc[0] > 0.3:
-            extreme = []
-            for idx in top_abs.index:
-                r = rets[idx]
-                if abs(r) > 0.3:
-                    if dt_col is not None:
-                        d = dt_col.iloc[idx].strftime("%Y-%m-%d %H:%M")
-                    else:
-                        d = str(idx)
-                    extreme.append({"date": d, "return": round(r * 100, 2)})
-            result["extreme_returns"] = extreme
-
-    return result
+def _bucket_files(subdir: str) -> list[tuple[str, str]]:
+    fs = HfFileSystem()
+    pattern = f"{BUCKET_BASE}/{subdir}/**/*.parquet"
+    results = []
+    for f in fs.glob(pattern):
+        uri = f"hf://{f}"
+        name = f.replace(f"{BUCKET_BASE.replace('hf://', '')}/{subdir}/", "")
+        results.append((name, uri))
+    return results
 
 
 def _fmt_date(ts: int) -> str:
     if not ts or ts <= 0:
         return "?"
     try:
-        import datetime as dt
-        return dt.datetime.fromtimestamp(ts / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
     except (OSError, ValueError):
         return "?"
 
 
-def audit_folder(data_dir: Path) -> None:
-    """Аудит всех parquet файлов в папке."""
-    files = sorted(data_dir.glob("*.parquet"))
-    if not files:
-        print(f"Нет parquet файлов в {data_dir}")
-        return
+def audit_df(df: pd.DataFrame, name: str, ts_col=None) -> dict:
+    """Проверить DataFrame. Возвращает dict с метриками."""
+    result = {"name": name, "issues": [], "warnings": [], "bars": 0,
+              "start": None, "end": None, "gap_days": None, "gaps": 0,
+              "has_ohlcv": False, "verdict": "ok"}
 
-    print(f"Аудит {data_dir}: {len(files)} файлов\n")
+    if df.empty:
+        result["issues"].append("пустой файл")
+        result["verdict"] = "fail"
+        return result
 
-    clean = 0
-    problems = []
+    result["bars"] = len(df)
 
-    for f in files:
-        r = audit_file(f)
-        if r["issues"]:
-            problems.append((f.name, r))
-        else:
-            clean += 1
+    if ts_col is None:
+        ts_col = "timestamp" if "timestamp" in df.columns else ("ts" if "ts" in df.columns else None)
 
-    print(f"Чистых: {clean}/{len(files)}")
-    print(f"С проблемами: {len(problems)}/{len(files)}")
+    if ts_col:
+        ts = df[ts_col].values
+        result["start"] = _fmt_date(ts[0])
+        result["end"] = _fmt_date(ts[-1])
 
-    if problems:
-        print(f"\n{'=' * 60}")
-        for name, r in problems:
-            print(f"\n  {name} ({r['bars']} баров, {r['start']} → {r['end']}):")
-            for issue in r["issues"]:
-                print(f"    - {issue}")
-            if r["extreme_returns"]:
-                print(f"    Экстремальные возвраты:")
-                for er in r["extreme_returns"]:
-                    print(f"      {er['date']}: {er['return']:+.1f}%")
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        result["gap_days"] = round((now_ms - ts[-1]) / 86400000, 1)
+
+        if result["gap_days"] > 3:
+            result["warnings"].append(f"устарело на {result['gap_days']}д")
+        if result["gap_days"] > 30:
+            result["issues"].append(f"сильно устарело ({result['gap_days']}д) — непригодно")
+
+        required = ["open", "high", "low", "close", "volume"]
+        has_ohlcv = all(c in df.columns for c in required)
+        result["has_ohlcv"] = has_ohlcv
+
+        if has_ohlcv:
+            for col in required:
+                if (df[col] <= 0).any():
+                    result["issues"].append(f"{col} <= 0: {(df[col] <= 0).sum()}")
+
+            if (df["low"] > df["high"]).any():
+                result["issues"].append(f"low > high: {(df['low'] > df['high']).sum()}")
+
+            # Гэпы
+            diffs = pd.Series(ts).diff().dropna()
+            tf_col = "timeframe" if "timeframe" in df.columns else ("interval" if "interval" in df.columns else None)
+            tf = df[tf_col].iloc[0] if tf_col else "1h"
+            expected = TF_MS.get(tf, 3600000)
+            result["gaps"] = int((diffs > expected * 1.5).sum())
+            if result["gaps"] > 0:
+                result["warnings"].append(f"гэпов: {result['gaps']}")
+
+        dups = df.duplicated(subset=[ts_col]).sum()
+        if dups > 0:
+            result["issues"].append(f"дубликатов: {dups}")
+
+        if result["bars"] < 1000:
+            result["issues"].append(f"мало данных ({result['bars']} баров)")
     else:
-        print("\nВсе файлы чистые!")
+        # Нет ts — просто проверяем непустоту
+        result["start"] = "?"
+        result["end"] = "?"
 
-    # Pair completeness (vision naming: {SYMBOL}_{TF}_{spot|perp}.parquet)
-    spots = {}
-    perps = {}
-    for f in files:
-        name = f.stem  # e.g. BTCUSDT_1h_spot
-        parts = name.rsplit("_", 1)  # ["BTCUSDT_1h", "spot"]
-        if len(parts) != 2:
+    if result["issues"]:
+        result["verdict"] = "fail"
+    elif result["warnings"]:
+        result["verdict"] = "warn"
+
+    return result
+
+
+def run_audit(subdirs: list[str] = None) -> list[dict]:
+    """Аудит всех файлов в bucket. Возвращает список результатов."""
+    if subdirs is None:
+        subdirs = ["ohlcv_spot", "ohlcv_perp", "funding", "metrics"]
+
+    results = []
+    for subdir in subdirs:
+        files = _bucket_files(subdir)
+        for name, uri in files:
+            try:
+                df = pd.read_parquet(uri)
+            except Exception as e:
+                results.append({"name": f"{subdir}/{name}", "issues": [f"ошибка чтения"],
+                                "bars": 0, "start": None, "end": None, "gap_days": None,
+                                "gaps": 0, "has_ohlcv": False, "verdict": "fail",
+                                "warnings": []})
+                continue
+            r = audit_df(df, f"{subdir}/{name}")
+            results.append(r)
+    return results
+
+
+def print_report(results: list[dict]):
+    """Красивый вывод аудита."""
+    by_subdir = {}
+    for r in results:
+        parts = r["name"].split("/", 1)
+        subdir = parts[0] if len(parts) > 1 else "other"
+        by_subdir.setdefault(subdir, []).append(r)
+
+    for label in ["ohlcv_spot", "ohlcv_perp", "funding", "metrics"]:
+        group = by_subdir.get(label, [])
+        if not group:
             continue
-        base_tf, src = parts
-        if src == "spot":
-            spots[base_tf] = f
-        elif src == "perp":
-            perps[base_tf] = f
+        names = {
+            "ohlcv_spot": "OHLCV Spot",
+            "ohlcv_perp": "OHLCV Perp",
+            "funding": "Funding Rate",
+            "metrics": "Metrics",
+        }
+        print(f"\n  {names.get(label, label)}:")
+        print(f"  {'─'*60}")
 
-    common_bases = set(spots.keys()) & set(perps.keys())
-    incomplete = sorted(set(spots.keys()) ^ set(perps.keys()))
-    if incomplete:
-        print(f"\nНеполные пары ({len(incomplete)}):")
-        for b in incomplete:
-            sides = []
-            if b in spots:
-                sides.append("spot")
-            if b in perps:
-                sides.append("perp")
-            print(f"    {b}: только {', '.join(sides)}")
-    print(f"Полных пар: {len(common_bases)}")
+        for r in sorted(group, key=lambda x: x["name"]):
+            short = r["name"].split("/", 1)[1] if "/" in r["name"] else r["name"]
+            bars = f"{r['bars']:>7,}" if r['bars'] else "      0"
+            dates = f"{r['start']} → {r['end']}" if r['start'] else "—"
+
+            if r["verdict"] == "fail":
+                icon = "❌"
+            elif r["verdict"] == "warn":
+                icon = "⚠"
+            else:
+                icon = "✅"
+
+            age = f"  (отставание: {r['gap_days']}д)" if r["gap_days"] is not None else ""
+
+            print(f"  {icon} {short:<40s} {bars} баров")
+            print(f"     {dates}{age}")
+            if r["gaps"] > 0:
+                print(f"     гэпы: {r['gaps']}")
+            for w in r.get("warnings", []):
+                print(f"     ⚠ {w}")
+            for issue in r.get("issues", []):
+                print(f"     ✗ {issue}")
+
+
+def main():
+    print("Аудит данных в HuggingFace Bucket\n")
+    results = run_audit()
+    print_report(results)
+
+    clean = sum(1 for r in results if r["verdict"] == "ok")
+    warn = sum(1 for r in results if r["verdict"] == "warn")
+    fail = sum(1 for r in results if r["verdict"] == "fail")
+    print(f"\n  {'='*60}")
+    print(f"  ✅ {clean} чистых  ⚠ {warn} с предупреждениями  ❌ {fail} непригодны")
+    print(f"  Всего: {len(results)} файлов")
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Аудит OHLCV данных")
-    parser.add_argument("data_dir", type=Path, nargs="?", default=Path("data"))
-    args = parser.parse_args()
-    audit_folder(args.data_dir)
+    main()

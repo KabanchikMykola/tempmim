@@ -22,8 +22,6 @@ from collections import defaultdict
 
 import requests
 import pandas as pd
-import duckdb
-
 from data_fetcher import config
 from data_fetcher.contracts import validate_ohlcv
 
@@ -71,82 +69,31 @@ from data_fetcher.binance_api.klines import fetch_tail
 # ── S3 download helpers ──────────────────────────────────────────
 
 
-def _db_path():
-    return Path(config.CACHE_DIR) / "binance_vision.db"
+def _bucket_parquet_uri(symbol, interval, source):
+    market_dir = "ohlcv_perp" if source == "perp" else "ohlcv_spot"
+    return f"{config.BUCKET_URI}/{market_dir}/{symbol}_{interval}.parquet"
 
 
-def _parquet_path(symbol, interval, source, year=None):
-    """Годовой parquet: fin_data/binance/ohlcv_spot/BTCUSDT_1h_2025.parquet."""
-    return config.ohlcv_path(symbol, interval, source, year)
-
-
-def _bucket_parquet_uri(symbol, interval, source, year):
-    return config.ohlcv_bucket_uri(symbol, interval, source, year)
-
-
-def _read_all_years(symbol, interval, source):
-    """Прочитать все годовые parquet для символа, склеить в один DataFrame."""
-    import glob as pyglob
-    pattern = config.ohlcv_pattern(symbol, interval, source)
-    files = sorted(pyglob.glob(pattern))
-    if not files:
-        return pd.DataFrame()
-    dfs = [_normalize_parquet_on_read(Path(f)) for f in files]
-    dfs = [d for d in dfs if not d.empty]
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True).sort_values("ts").reset_index(drop=True)
-
-
-def _sync_from_bucket(symbol, interval, source):
-    """Скачать годовые parquet из bucket (если нет локально)."""
+def _load_from_bucket(symbol, interval, source):
+    """Прочитать единый parquet из bucket."""
     if not config.BUCKET_ID:
         return None
-    now = datetime.now(timezone.utc)
-    years = list(range(now.year - 3, now.year + 1))
-    dfs = []
-    for year in years:
-        pq = _parquet_path(symbol, interval, source, year)
-        if pq.exists():
-            continue
-        try:
-            uri = _bucket_parquet_uri(symbol, interval, source, year)
-            df = pd.read_parquet(uri)
-            if not df.empty:
-                pq.parent.mkdir(parents=True, exist_ok=True)
-                df.to_parquet(pq, index=False)
-                dfs.append(df)
-        except Exception:
-            pass
-    if dfs:
-        return pd.concat(dfs, ignore_index=True).sort_values("ts").reset_index(drop=True)
-    return None
-
-
-def _sync_to_bucket(symbol, interval, source, df=None):
-    """Загрузить годовые parquet в bucket."""
-    if not config.BUCKET_ID:
-        return
+    uri = _bucket_parquet_uri(symbol, interval, source)
     try:
-        if df is not None and not df.empty:
-            df = df.copy()
-            df["_year"] = pd.to_datetime(df["ts"], unit="ms").dt.year
-            for year in df["_year"].unique():
-                ydf = df[df["_year"] == year].drop(columns=["_year"])
-                pq = _parquet_path(symbol, interval, source, year)
-                pq.parent.mkdir(parents=True, exist_ok=True)
-                ydf.to_parquet(pq, index=False)
-                uri = _bucket_parquet_uri(symbol, interval, source, year)
-                ydf.to_parquet(uri, index=False)
-        else:
-            now = datetime.now(timezone.utc)
-            for year in range(now.year - 3, now.year + 1):
-                pq = _parquet_path(symbol, interval, source, year)
-                if pq.exists():
-                    uri = _bucket_parquet_uri(symbol, interval, source, year)
-                    pd.read_parquet(pq).to_parquet(uri, index=False)
-    except Exception as e:
-        print(f"  bucket sync error: {e}")
+        df = pd.read_parquet(uri)
+        if df.empty:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _upload_to_bucket(symbol, interval, source, df):
+    """Загрузить DataFrame как единый parquet в bucket."""
+    if df is None or df.empty or not config.BUCKET_ID:
+        return
+    uri = _bucket_parquet_uri(symbol, interval, source)
+    df.to_parquet(uri, index=False)
 
 
 def download_monthly(symbol, interval, year, month, perp=False):
@@ -217,155 +164,56 @@ def download_daily(symbol, interval, date_str, perp=False):
     return pd.DataFrame()
 
 
-# ── DuckDB helpers ───────────────────────────────────────────────
 
-
-def _init_duckdb(conn):
-    """Создать таблицу klines если не существует."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS klines (
-            symbol VARCHAR, source VARCHAR, interval VARCHAR,
-            open_time BIGINT, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
-            volume DOUBLE, close_time BIGINT, quote_volume DOUBLE,
-            count INTEGER, taker_buy_base DOUBLE, taker_buy_quote DOUBLE, ts BIGINT
-        )
-    """)
-
-
-def _db_max_ts(conn, symbol, source, interval):
-    """Максимальный ts в DuckDB для (symbol, source, interval), 0 если нет данных."""
-    result = conn.execute(
-        "SELECT COALESCE(MAX(ts), 0) FROM klines WHERE symbol=? AND source=? AND interval=?",
-        [symbol, source, interval],
-    ).fetchone()
-    return result[0] if result else 0
-
-
-def _db_count(conn, symbol, source, interval):
-    result = conn.execute(
-        "SELECT COUNT(*) FROM klines WHERE symbol=? AND source=? AND interval=?",
-        [symbol, source, interval],
-    ).fetchone()
-    return result[0] if result else 0
-
-
-def _db_insert_batch(conn, df):
-    """Вставить только строки с ts > чем уже есть в DuckDB для данной (symbol, source, interval)."""
-    if df.empty:
-        return 0
-
-    row = df.iloc[0]
-    symbol, source, interval = row["symbol"], row["source"], row["interval"]
-
-    max_ts = conn.execute(
-        "SELECT COALESCE(MAX(ts), 0) FROM klines WHERE symbol=? AND source=? AND interval=?",
-        [symbol, source, interval],
-    ).fetchone()[0]
-
-    df_new = df[df["ts"] > max_ts]
-    if df_new.empty:
-        return 0
-
-    conn.execute("""
-        INSERT INTO klines
-        SELECT symbol, source, interval, open_time, open, high, low, close,
-               volume, close_time, quote_volume, count, taker_buy_base,
-               taker_buy_quote, ts FROM df_new
-    """)
-    return len(df_new)
-
-
-def _export_to_parquet(conn, symbol, source, interval):
-    """Экспортировать данные из DuckDB в годовые Parquet."""
-    df = conn.execute(
-        "SELECT *, ts AS timestamp FROM klines WHERE symbol=? AND source=? AND interval=? ORDER BY ts",
-        [symbol, source, interval],
-    ).fetchdf()
-    if df.empty:
-        return df
-    df["_year"] = pd.to_datetime(df["ts"], unit="ms").dt.year
-    for year in df["_year"].unique():
-        ydf = df[df["_year"] == year].drop(columns=["_year"])
-        pq = _parquet_path(symbol, interval, source, year)
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        ydf.to_parquet(pq, index=False)
-    return df
-
-
-def _normalize_parquet_on_read(pq):
-    """Прочитать parquet, нормализовать timestamp, перезаписать если были µs."""
-    df = pd.read_parquet(pq)
-    if df.empty:
-        return df
-
-    fixed = False
-    for col in ("open_time", "close_time", "ts"):
-        if col in df.columns and _is_microseconds(df[col]).any():
-            df = _normalize_timestamps(df)
-            fixed = True
-            break
-
-    # Добавить timestamp если нет (для старых файлов)
-    if "timestamp" not in df.columns and "ts" in df.columns:
-        df["timestamp"] = df["ts"]
-        fixed = True
-
-    if fixed and not df.empty:
-        df.to_parquet(pq, index=False)
-
-    return df
 
 
 # ── Core: fetch_symbol ───────────────────────────────────────────
 
 
-def _generate_months(years):
-    """Сгенерировать список (year, month) от (now - years) до текущего месяца.
+def _generate_months(years, end_time=None):
+    """Сгенерировать список (year, month) от (end_time - years) до end_time.
 
-    Текущий месяц включён — monthly архив 404 → fallback на daily.
+    end_time по умолчанию = сейчас. Текущий месяц включён.
     """
-    now = datetime.now(timezone.utc)
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
     months = []
-    start_yr = now.year - years
-    for yr in range(start_yr, now.year + 1):
-        end_m = now.month if yr == now.year else 12
+    start_yr = end_time.year - years
+    for yr in range(start_yr, end_time.year + 1):
+        end_m = end_time.month if yr == end_time.year else 12
         for mo in range(1, end_m + 1):
             months.append((yr, mo))
     return months
 
 
 def fetch_symbol(symbol, interval="1h", years=3, perp=False,
-                 export_parquet=True, tail=False, tail_only=False, validate=True):
+                 export_parquet=True, tail=False, tail_only=False, validate=True,
+                 end_time=None):
     """Загрузить klines для одного символа.
 
     Args:
         symbol: Тикер (BTCUSDT, ETHUSDT...)
         interval: Таймфрейм (1m, 5m, 15m, 1h, 4h, 1d)
-        years: Сколько лет качать с S3 (если нет в кеше)
+        years: Сколько лет качать с S3
         perp: True = перпетуалы, False = спот
         export_parquet: Экспортировать в Parquet после загрузки
         tail: Докачать хвост через Binance REST API
         tail_only: ТОЛЬКО хвост, без S3 и кеша
         validate: Запустить валидацию после загрузки
+        end_time: Верхняя граница (datetime, UTC). None = сейчас.
 
     Returns:
         (pd.DataFrame, warnings) — данные и список предупреждений.
     """
     source = "perp" if perp else "spot"
-    db = _db_path()
     all_warnings = []
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
+    end_ms = int(end_time.timestamp() * 1000)
 
-    # ── helpers для работы с годовыми файлами ──
-    def _cur_year_pq():
-        return _parquet_path(symbol, interval, source, datetime.now(timezone.utc).year)
-
-    def _has_any_years():
-        import glob as pyglob
-        return len(pyglob.glob(config.ohlcv_pattern(symbol, interval, source))) > 0
-
-    # ── tail_only: только REST API, без S3 и кеша ──
+    # ── tail_only: только REST API ──
     if tail_only:
-        tail_df = fetch_tail(symbol, interval, perp)
+        tail_df = fetch_tail(symbol, interval, perp, end_time=end_ms)
         if tail_df.empty:
             return pd.DataFrame(), ["tail: нет данных от API"]
         tail_df["symbol"] = symbol
@@ -373,103 +221,59 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
         tail_df["interval"] = interval
         tail_df, tw = validate_ohlcv(tail_df, interval)
         all_warnings.extend(tw)
-        if export_parquet:
-            cur = _cur_year_pq()
-            cur.parent.mkdir(parents=True, exist_ok=True)
-            if _has_any_years():
-                old = _read_all_years(symbol, interval, source)
-                old_new = old[old["ts"] < tail_df["ts"].min()]
-                merged = pd.concat([old_new, tail_df], ignore_index=True)
-                merged = merged.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
-                merged["timestamp"] = merged["ts"]
-                _sync_to_bucket(symbol, interval, source, merged)
-                n_new = len(merged) - len(old_new)
-                if n_new > 0:
-                    all_warnings.append(f"   tail: +{n_new} баров (мерж с существующими)")
-                return merged, all_warnings
-            tail_df["timestamp"] = tail_df["ts"]
-            _sync_to_bucket(symbol, interval, source, tail_df)
+        _upload_to_bucket(symbol, interval, source, tail_df)
         return tail_df, all_warnings
 
-    # ── 1. Загрузить из bucket в локальный кеш ──
-    if config.BUCKET_ID and not _has_any_years():
-        bucket_df = _sync_from_bucket(symbol, interval, source)
-        if bucket_df is not None and len(bucket_df) > 1000:
-            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            max_ts = bucket_df["ts"].max()
-            staleness_days = (now_ms - max_ts) / 86400000
-            if staleness_days < 2:
-                return bucket_df, all_warnings
+    # ── 1. Загрузить существующие данные из bucket ──
+    existing = _load_from_bucket(symbol, interval, source)
+    if existing is not None:
+        existing = existing[existing["ts"] <= end_ms]
+    if existing is not None and len(existing) > 1000:
+        staleness_days = (end_ms - existing["ts"].max()) / 86400000
 
-    # ── 2. Проверить годовые Parquet ──
-    if _has_any_years():
-        df = _read_all_years(symbol, interval, source)
-        if len(df) > 1000:
-            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            max_ts = df["ts"].max()
-            staleness_days = (now_ms - max_ts) / 86400000
+        if staleness_days < 2:
+            if tail:
+                tail_df = fetch_tail(symbol, interval, perp, end_time=end_ms)
+                if not tail_df.empty and tail_df["ts"].max() > existing["ts"].max():
+                    tail_df["symbol"] = symbol
+                    tail_df["source"] = source
+                    tail_df["interval"] = interval
+                    tail_new = tail_df[tail_df["ts"] > existing["ts"].max()]
+                    if not tail_new.empty:
+                        existing = pd.concat([existing, tail_new], ignore_index=True)
+                        existing = existing.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+                        existing = existing[existing["ts"] <= end_ms]
+                        existing["timestamp"] = existing["ts"]
+                        _upload_to_bucket(symbol, interval, source, existing)
+                        all_warnings.append(f"   tail: +{len(tail_new)} баров от API")
+            return existing, all_warnings
 
-            if staleness_days < 2:
-                if tail:
-                    tail_df = fetch_tail(symbol, interval, perp)
-                    if not tail_df.empty and tail_df["ts"].max() > max_ts:
-                        tail_df["symbol"] = symbol
-                        tail_df["source"] = source
-                        tail_df["interval"] = interval
-                        tail_new = tail_df[tail_df["ts"] > max_ts]
-                        if not tail_new.empty:
-                            df = pd.concat([df, tail_new], ignore_index=True)
-                            df = df.drop_duplicates(subset=["ts"]).sort_values("ts")
-                            df = df.reset_index(drop=True)
-                            df["timestamp"] = df["ts"]
-                            _sync_to_bucket(symbol, interval, source, df)
-                            all_warnings.append(f"   tail: +{len(tail_new)} баров от API")
-                return df, all_warnings
+        all_warnings.append(f"   данные устарели на {staleness_days:.0f}д — докачка")
 
-            all_warnings.append(f"   кеш устарел на {staleness_days:.0f}д — докачка")
-
-    # ── 3. Подготовить DuckDB ──
-    db.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db))
-    _init_duckdb(conn)
-
-    existing_count = _db_count(conn, symbol, source, interval)
-    db_max = _db_max_ts(conn, symbol, source, interval)
-
-    # ── 4. Определить какие месяцы нужно скачать ──
-    if db_max > 0 and existing_count > 1000:
-        # Есть данные в DuckDB — качаем только начиная с db_max
-        from datetime import datetime as dt
-        db_dt = dt.fromtimestamp(db_max / 1000, tz=timezone.utc)
-        all_months = _generate_months(years)
+    # ── 2. Определить какие месяцы нужно скачать ──
+    if existing is not None and not existing.empty:
+        db_max = existing["ts"].max()
+        db_dt = datetime.fromtimestamp(db_max / 1000, tz=timezone.utc)
+        all_months = _generate_months(years, end_time)
         months_to_fetch = [(y, m) for y, m in all_months
                            if (y > db_dt.year) or (y == db_dt.year and m >= db_dt.month)]
     else:
-        months_to_fetch = _generate_months(years)
+        months_to_fetch = _generate_months(years, end_time)
 
     if not months_to_fetch:
-        conn.close()
-        if export_parquet:
-            df, _ = _export_to_parquet(conn, symbol, source, interval)
-            return (df, all_warnings) if not df.empty else (pd.DataFrame(), all_warnings)
-        df = conn.execute(
-            "SELECT * FROM klines WHERE symbol=? AND source=? AND interval=? ORDER BY ts",
-            [symbol, source, interval],
-        ).fetchdf()
-        conn.close()
-        return df, all_warnings
+        if existing is not None and not existing.empty:
+            return existing, all_warnings
+        return pd.DataFrame(), all_warnings
 
-    # ── 5. Скачать с S3 параллельно ──
+    # ── 3. Скачать с S3 параллельно ──
     import calendar
-
-    now = datetime.now(timezone.utc)
 
     def _fetch_month(yr, mo):
         df = download_monthly(symbol, interval, yr, mo, perp)
         if not df.empty:
             return df
         days_in_month = calendar.monthrange(yr, mo)[1]
-        max_day = now.day if (yr == now.year and mo == now.month) else days_in_month
+        max_day = end_time.day if (yr == end_time.year and mo == end_time.month) else days_in_month
         daily_dfs = []
         for day in range(1, max_day + 1):
             date_str = f"{yr}-{mo:02d}-{day:02d}"
@@ -480,12 +284,11 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
             return pd.concat(daily_dfs, ignore_index=True)
         return pd.DataFrame()
 
-    total_inserted = 0
+    s3_dfs = []
     with ThreadPoolExecutor(max_workers=config.VISION_WORKERS) as ex:
         futures = {ex.submit(_fetch_month, yr, mo): (yr, mo)
                    for yr, mo in months_to_fetch}
         for f in as_completed(futures):
-            yr, mo = futures[f]
             try:
                 df = f.result()
             except Exception:
@@ -495,86 +298,63 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
             df["symbol"] = symbol
             df["source"] = source
             df["interval"] = interval
-            n = _db_insert_batch(conn, df)
-            total_inserted += n
+            s3_dfs.append(df)
 
-    # ── 6. Tail через REST API ──
+    # ── 4. Склеить существующие и новые данные ──
+    all_dfs = []
+    if existing is not None and not existing.empty:
+        all_dfs.append(existing)
+    all_dfs.extend(s3_dfs)
+    if not all_dfs:
+        return pd.DataFrame(), all_warnings
+
+    merged = pd.concat(all_dfs, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    merged = merged[merged["ts"] <= end_ms]
+    merged["timestamp"] = merged["ts"]
+
+    # ── 5. Tail через REST API ──
     if tail:
-        tail_df = fetch_tail(symbol, interval, perp)
+        tail_df = fetch_tail(symbol, interval, perp, end_time=end_ms)
         if not tail_df.empty:
             tail_df["symbol"] = symbol
             tail_df["source"] = source
             tail_df["interval"] = interval
-            n = _db_insert_batch(conn, tail_df)
-            if n > 0:
-                all_warnings.append(f"   tail API: +{n} баров")
-            total_inserted += n
+            tail_new = tail_df[tail_df["ts"] > merged["ts"].max()]
+            if not tail_new.empty:
+                merged = pd.concat([merged, tail_new], ignore_index=True)
+                merged = merged.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+                merged = merged[merged["ts"] <= end_ms]
+                merged["timestamp"] = merged["ts"]
+                all_warnings.append(f"   tail API: +{len(tail_new)} баров")
 
-    # ── 7. Выгрузить результат ──
-    df = conn.execute(
-        "SELECT * FROM klines WHERE symbol=? AND source=? AND interval=? ORDER BY ts",
-        [symbol, source, interval],
-    ).fetchdf()
-
-    if validate and not df.empty:
-        df, vw = validate_ohlcv(df, interval)
+    # ── 6. Валидация ──
+    if validate and not merged.empty:
+        merged, vw = validate_ohlcv(merged, interval)
         all_warnings.extend(vw)
 
-    if export_parquet and not df.empty:
-        _export_to_parquet(conn, symbol, source, interval)
-        _sync_to_bucket(symbol, interval, source, df)
+    # ── 7. Загрузить в bucket ──
+    _upload_to_bucket(symbol, interval, source, merged)
 
-    conn.close()
-
-    return df, all_warnings
+    return merged, all_warnings
 
 
-# ── Export / Summary ─────────────────────────────────────────────
+# ── Bucket summary (на основе данных в bucket) ────────────────────
 
 
-def export_all():
-    """Экспортировать все данные из DuckDB в Parquet."""
-    db = _db_path()
-    if not db.exists():
-        print("  Кеш пуст")
-        return
-    conn = duckdb.connect(str(db))
-    rows = conn.execute(
-        "SELECT DISTINCT symbol, source, interval FROM klines"
-    ).fetchall()
-    for symbol, source, interval in rows:
-        print(f"  Экспорт {symbol} {source} {interval}")
-        _export_to_parquet(conn, symbol, source, interval)
-    conn.close()
-
-
-def summary():
-    """Вывести сводку по данным в DuckDB."""
-    db = _db_path()
-    if not db.exists():
-        print("  Кеш пуст")
-        return
-    conn = duckdb.connect(str(db), read_only=True)
-    result = conn.execute("""
-        SELECT symbol, source, interval, COUNT(*), MIN(ts), MAX(ts)
-        FROM klines
-        GROUP BY symbol, source, interval
-        ORDER BY symbol, source, interval
-    """).fetchall()
-    conn.close()
-
-    for symbol, source, interval, cnt, t_min, t_max in result:
-        def _fmt(ts):
-            if not ts or ts <= 0:
-                return "?"
-            try:
-                return datetime.fromtimestamp(
-                    ts / 1000, tz=timezone.utc
-                ).strftime("%Y-%m-%d")
-            except (OSError, ValueError):
-                return "?"
-        print(f"    {symbol:>12} {source:>5} {interval:>4}: "
-              f"{cnt:>8,} баров ({_fmt(t_min)} - {_fmt(t_max)})")
+def list_bucket_data():
+    """Вывести сводку данных в bucket."""
+    from data_fetcher.config import list_bucket
+    for subdir in ["binance/ohlcv_spot/", "binance/ohlcv_perp/"]:
+        files = list_bucket(subdir)
+        if not files:
+            continue
+        total_mb = sum(f["size_bytes"] for f in files) / 1024 / 1024
+        print(f"  Bucket: {subdir.strip('/')}  ({len(files)} файлов, {total_mb:.0f} MB)")
+        for f in sorted(files, key=lambda x: x["path"]):
+            size_kb = f["size_bytes"] / 1024
+            print(f"    {f['path']:68s} {size_kb:>8.0f} KB")
+    print()
 
 
 # ── CLI ───────────────────────────────────────────────────────────
@@ -593,19 +373,7 @@ def main():
                         help="Перпетуалы вместо спота")
     parser.add_argument("--tail", action="store_true",
                         help="Докачать последние бары через API")
-    parser.add_argument("--export-all", action="store_true",
-                        help="Экспорт всего кеша в Parquet")
-    parser.add_argument("--summary", action="store_true",
-                        help="Сводка по кешу")
     args = parser.parse_args()
-
-    if args.export_all:
-        export_all()
-        return
-
-    if args.summary:
-        summary()
-        return
 
     t0 = time.time()
     for symbol in args.symbol:
@@ -619,7 +387,7 @@ def main():
             print(w)
         print(f"  {symbol} ({src_name}): {len(df):,} баров")
 
-    summary()
+    list_bucket_data()
     print(f"\n  Время: {time.time()-t0:.1f}s")
 
 

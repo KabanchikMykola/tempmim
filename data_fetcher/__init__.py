@@ -4,7 +4,6 @@
   ccxt_api/         -- OHLCV через ccxt API (спот + перпы)
   binance_vision/   -- Исторические данные с data.binance.vision (S3)
   binance_api/      -- Binance REST API (exchangeInfo)
-  websocket/        -- Реалтайм WebSocket pipeline (ccxt.pro)
 """
 
 __all__ = [

@@ -29,5 +29,8 @@ another_google_cloud_project/
 *.tmp
 *.log
 
+# Local inspection / debug dumps
+binance_inspect/
+
 # PyTorch Lightning training artifacts (TensorBoard events, hparams)
 lightning_logs/

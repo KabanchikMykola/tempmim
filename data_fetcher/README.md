@@ -34,7 +34,7 @@ data_fetcher/
   ccxt_api/          — OHLCV via ccxt API (spot + perp), exchange audit
   binance_vision/    — Historical data from data.binance.vision (S3)
   binance_api/       — Binance REST API (exchangeInfo, OHLCV tail)
-  websocket/         — Realtime WebSocket pipeline (ccxt.pro)
+
   config.py          — MIN_VOLUME_USD, SINCE, TIMEFRAME, WORKERS
   audit.py           — Data quality audit for parquet files
   benchmark.py       — Binance API parallel benchmark
@@ -123,13 +123,3 @@ close_time, quote_volume, count, taker_buy_base, taker_buy_quote, ts
 - HuggingFace Bucket: `hf://buckets/Kabanchik/mimo/fin_data/`
 - Upload: `upload_to_bucket(Path("data"), "Kabanchik/mimo")`
 
-## WebSocket status ⚠️
-
-`data_fetcher/websocket/` — **экспериментальный** функционал.
-
-Сбор данных в реальном времени через WebSocket требует **выделенного сервера, работающего 24/7**, поэтому пока это не приоритет. Весь текущий фокус — на исторических данных через REST + Binance Vision S3.
-
-Не тратьте время на websocket, пока не решены базовые задачи:
-- загрузка и качество исторических данных
-- генерация альфа-сигналов
-- бэктестинг стратегий

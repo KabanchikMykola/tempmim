@@ -39,7 +39,7 @@ data_fetcher/           # Основной пакет
   ccxt_api/             # OHLCV через ccxt, аудит бирж
   binance_vision/       # S3-архивы data.binance.vision
   binance_api/          # REST API Binance (exchangeInfo)
-  websocket/            # Реалтайм WebSocket
+
 
 alpha_research/         # Скрипты исследования
   strategies_basis.py           # Basis z-score стратегия

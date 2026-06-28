@@ -26,10 +26,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import pandas as pd
-import duckdb
 
 from data_fetcher import config
 from data_fetcher.contracts import validate_metrics
+from data_fetcher.binance_api.tail import tail_open_interest_hist, tail_taker_vol_ratio
 
 # ── Константы ────────────────────────────────────────────────────
 
@@ -50,49 +50,8 @@ S3_BASE = "https://data.binance.vision/data/futures/um/daily/metrics"
 # ── Path helpers ─────────────────────────────────────────────────
 
 
-def _db_path():
-    return Path(config.CACHE_DIR) / "binance_vision.db"
-
-
-def _parquet_path(symbol):
-    """Путь к parquet: fin_data/binance/metrics/{symbol}_metrics.parquet."""
-    return config.metrics_path(symbol)
-
-
 def _bucket_parquet_uri(symbol):
-    """URI к parquet в HuggingFace Bucket."""
-    return config.metrics_bucket_uri(symbol)
-
-
-# ── DuckDB helpers ───────────────────────────────────────────────
-
-
-def _init_db(conn):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS metrics (
-            symbol VARCHAR, create_time BIGINT,
-            sum_open_interest DOUBLE, sum_open_interest_value DOUBLE,
-            count_toptrader_long_short_ratio DOUBLE,
-            sum_toptrader_long_short_ratio DOUBLE,
-            count_long_short_ratio DOUBLE,
-            sum_taker_long_short_vol_ratio DOUBLE,
-            ts BIGINT
-        )
-    """)
-
-
-def _db_max_ts(conn, symbol):
-    result = conn.execute(
-        "SELECT COALESCE(MAX(ts), 0) FROM metrics WHERE symbol=?", [symbol]
-    ).fetchone()
-    return result[0] if result else 0
-
-
-def _db_count(conn, symbol):
-    result = conn.execute(
-        "SELECT COUNT(*) FROM metrics WHERE symbol=?", [symbol]
-    ).fetchone()
-    return result[0] if result else 0
+    return f"{config.BUCKET_URI}/metrics/{symbol}_metrics.parquet"
 
 
 # ── Date helpers ─────────────────────────────────────────────────
@@ -133,7 +92,7 @@ def download_daily(symbol, date_str):
                 # Timestamp → миллисекунды (как open_time в klines)
                 df["create_time"] = (
                     pd.to_datetime(df["create_time"], utc=True)
-                    .astype("int64") // 10**6
+                    .astype("int64") // 10**3
                 )
                 for col in METRICS_COLS[2:]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -146,51 +105,24 @@ def download_daily(symbol, date_str):
 # ── HuggingFace Bucket helpers ───────────────────────────────────
 
 
-def _sync_from_bucket(symbol):
-    """Скачать parquet из bucket в локальный кеш (если есть). Возвращает DataFrame или None."""
+def _load_from_bucket(symbol):
+    """Прочитать metrics parquet из bucket."""
     if not config.BUCKET_ID:
-        return None
-    pq = _parquet_path(symbol)
-    if pq.exists():
         return None
     try:
         uri = _bucket_parquet_uri(symbol)
         df = pd.read_parquet(uri)
-        if df.empty:
-            return None
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(pq, index=False)
-        return df
-    except Exception as e:
-        print(f"  ошибка bucket sync: {e}")
+        return df if not df.empty else None
+    except Exception:
         return None
 
 
-def _sync_to_bucket(symbol, df=None):
-    """Загрузить локальный parquet в bucket. Принимает DataFrame для избежания повторного чтения."""
-    if not config.BUCKET_ID:
+def _upload_to_bucket(symbol, df):
+    """Загрузить metrics parquet в bucket."""
+    if df is None or df.empty or not config.BUCKET_ID:
         return
-    try:
-        if df is None:
-            pq = _parquet_path(symbol)
-            if not pq.exists():
-                return
-            df = pd.read_parquet(pq)
-        uri = _bucket_parquet_uri(symbol)
-        df.to_parquet(uri, index=False)
-    except Exception as e:
-        print(f"  ошибка bucket sync: {e}")
-
-
-def _load_parquet(symbol):
-    """Прочитать локальный parquet (если есть)."""
-    pq = _parquet_path(symbol)
-    if pq.exists():
-        try:
-            return pd.read_parquet(pq)
-        except Exception as e:
-            print(f"  ошибка чтения parquet: {e}")
-    return pd.DataFrame()
+    uri = _bucket_parquet_uri(symbol)
+    df.to_parquet(uri, index=False)
 
 
 # ── Валидация ────────────────────────────────────────────────────
@@ -215,135 +147,96 @@ def _validate_metrics(df):
 # ── Core: fetch_metrics ──────────────────────────────────────────
 
 
-def fetch_metrics(symbol, years=3, export_parquet=True, force=False):
+def fetch_metrics(symbol, years=3, force=False, tail=True):
     """Загрузить derivatives metrics для одного символа.
-
-    Кеш: Parquet (data/) → DuckDB (data/cache/) → S3 (data.binance.vision).
-    Если BUCKET_ID задан — синхронизация с HuggingFace Bucket.
-
-    Архитектура данных:
-      DuckDB — промежуточный слой для мержа данных.
-      Parquet — локальный кеш для быстрого чтения.
-      Bucket — долгосрочное хранилище (облачные среды).
 
     Args:
         symbol: Тикер (BTCUSDT, ETHUSDT...)
         years: Сколько лет
-        export_parquet: Экспорт в Parquet
-        force: Принудительная перезагрузка
+        force: Принудительная перезагрузка с S3
+        tail: Докачать хвост через API
 
     Returns:
         (pd.DataFrame, warnings)
     """
     all_warnings = []
-    pq = _parquet_path(symbol)
 
-    # ── 1. Загрузить из bucket в локальный кеш ──
-    if config.BUCKET_ID and not pq.exists():
-        bucket_df = _sync_from_bucket(symbol)
-        if bucket_df is not None and len(bucket_df) > 1000:
-            return bucket_df, all_warnings
+    # ── 1. Загрузить существующие данные из bucket ──
+    existing = _load_from_bucket(symbol)
+    if existing is not None and len(existing) > 1000 and not force:
+        max_ts = existing["ts"].max()
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        gap_days = (now_ms - max_ts) / 86400000
 
-    # ── 2. Проверить локальный Parquet ──
-    if pq.exists() and not force:
-        try:
-            df = pd.read_parquet(pq)
-            if len(df) > 1000:
-                # Проверяем свежесть: если данные устарели > 2 дней —
-                # автоматически докачиваем
-                max_ts = df["ts"].max()
-                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                yesterday_ms = now_ms - 86400000
-                gap_days = (yesterday_ms - max_ts) / 86400000
+        if gap_days <= 2:
+            if tail:
+                # Tail OI
+                oi_df = tail_open_interest_hist(symbol, start_time=max_ts + 1)
+                if not oi_df.empty:
+                    oi_new = oi_df[oi_df["ts"] > max_ts]
+                    if not oi_new.empty:
+                        oi_new["symbol"] = symbol
+                        oi_new["create_time"] = oi_new["ts"]
+                        for col in ["count_toptrader_long_short_ratio",
+                                     "sum_toptrader_long_short_ratio",
+                                     "count_long_short_ratio",
+                                     "sum_taker_long_short_vol_ratio"]:
+                            oi_new[col] = None
+                        existing = pd.concat([existing, oi_new], ignore_index=True)
+                        all_warnings.append(f"   tail OI: +{len(oi_new)} записей")
 
-                if gap_days <= 2:
-                    return df, all_warnings
+                # Tail taker vol
+                tv_df = tail_taker_vol_ratio(symbol, start_time=max_ts + 1)
+                if not tv_df.empty:
+                    tv_new = tv_df[tv_df["ts"] > max_ts]
+                    if not tv_new.empty:
+                        tv_new["symbol"] = symbol
+                        tv_new["create_time"] = tv_new["ts"]
+                        for col in ["sum_open_interest", "sum_open_interest_value",
+                                     "count_toptrader_long_short_ratio",
+                                     "sum_toptrader_long_short_ratio",
+                                     "count_long_short_ratio"]:
+                            tv_new[col] = None
+                        existing = pd.concat([existing, tv_new], ignore_index=True)
+                        all_warnings.append(f"   tail taker vol: +{len(tv_new)} записей")
 
-                # Данные устарели — нужна докачка
-                all_warnings.append(
-                    f"  кеш устарел на {gap_days:.0f}д — докачка"
-                )
-                force = True
-        except Exception:
-            pass
+                if all_warnings:
+                    existing = existing.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
+                    _upload_to_bucket(symbol, existing)
 
-    # ── 3. Подготовить DuckDB ──
-    db = _db_path()
-    db.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db))
-    _init_db(conn)
+            existing, vw = _validate_metrics(existing)
+            all_warnings.extend(vw)
+            return existing, all_warnings
 
-    # Загрузить существующий parquet в DuckDB (если DuckDB пустой)
-    if _db_count(conn, symbol) == 0:
-        existing = _load_parquet(symbol)
-        if not existing.empty:
-            existing["symbol"] = symbol
-            conn.execute("""
-                INSERT INTO metrics
-                SELECT symbol, create_time, sum_open_interest,
-                       sum_open_interest_value,
-                       count_toptrader_long_short_ratio,
-                       sum_toptrader_long_short_ratio,
-                       count_long_short_ratio,
-                       sum_taker_long_short_vol_ratio,
-                       ts FROM existing
-            """)
+        all_warnings.append(f"  данные устарели на {gap_days:.0f}д — докачка")
 
-    # При force-режиме очищаем старые данные для переимпорта
-    if force:
-        conn.execute("DELETE FROM metrics WHERE symbol=?", [symbol])
-
-    existing_count = _db_count(conn, symbol)
-    if existing_count > 10000 and not force:
-        df = conn.execute(
-            "SELECT * FROM metrics WHERE symbol=? ORDER BY ts", [symbol]
-        ).fetchdf()
-        conn.close()
-        if export_parquet and not df.empty:
-            pq.parent.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(pq, index=False)
-            _sync_to_bucket(symbol, df)
-        return df, all_warnings
-
-    # ── 4. Определить недостающие даты ──
+    # ── 2. Определить недостающие даты ──
     all_dates = _generate_dates(years)
-    db_max = _db_max_ts(conn, symbol)
+    max_ts = existing["ts"].max() if existing is not None and not existing.empty else 0
 
-    if db_max > 0:
-        db_dt = datetime.fromtimestamp(db_max / 1000, tz=timezone.utc)
-        cutoff = db_dt.strftime("%Y-%m-%d")
+    if max_ts > 0:
+        cutoff = datetime.fromtimestamp(max_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
         dates_to_fetch = [d for d in all_dates if d > cutoff]
     else:
         dates_to_fetch = all_dates
 
-    if not dates_to_fetch:
-        # Данные уже полные — экспорт и возврат
-        df = conn.execute(
-            "SELECT * FROM metrics WHERE symbol=? ORDER BY ts", [symbol]
-        ).fetchdf()
-        conn.close()
-        if not df.empty:
-            df, vw = validate_metrics(df)
-            all_warnings.extend(vw)
-        if export_parquet and not df.empty:
-            pq.parent.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(pq, index=False)
-            _sync_to_bucket(symbol)
-        return df, all_warnings
+    if not dates_to_fetch and existing is not None and not existing.empty:
+        existing, vw = _validate_metrics(existing)
+        all_warnings.extend(vw)
+        return existing, all_warnings
 
-    # ── 5. Параллельная загрузка с S3 ──
+    # ── 3. Параллельная загрузка с S3 ──
     def _fetch_one(date_str):
         df = download_daily(symbol, date_str)
         if not df.empty:
             df["ts"] = df["create_time"]
         return date_str, df
 
-    total_inserted = 0
+    s3_dfs = []
     errors = 0
     with ThreadPoolExecutor(max_workers=config.VISION_WORKERS) as ex:
         futures = {ex.submit(_fetch_one, d): d for d in dates_to_fetch}
         for f in as_completed(futures):
-            date_str = futures[f]
             try:
                 _, df = f.result()
             except Exception:
@@ -351,94 +244,66 @@ def fetch_metrics(symbol, years=3, export_parquet=True, force=False):
                 continue
             if df.empty:
                 continue
-            df["symbol"] = symbol
-            conn.execute("""
-                INSERT INTO metrics
-                SELECT symbol, create_time, sum_open_interest,
-                       sum_open_interest_value,
-                       count_toptrader_long_short_ratio,
-                       sum_toptrader_long_short_ratio,
-                       count_long_short_ratio,
-                       sum_taker_long_short_vol_ratio,
-                       ts FROM df
-            """)
-            total_inserted += len(df)
+            s3_dfs.append(df)
 
     if errors > 0:
         all_warnings.append(f"  {errors} ошибок загрузки")
 
-    if total_inserted == 0:
-        all_warnings.append("  Нет новых данных с S3")
-        conn.close()
-        if export_parquet and pq.exists():
-            df = pd.read_parquet(pq)
-            return df, all_warnings
+    # ── 4. Склеить ──
+    all_dfs = []
+    if existing is not None and not existing.empty:
+        all_dfs.append(existing)
+    all_dfs.extend(s3_dfs)
+
+    if not all_dfs:
         return pd.DataFrame(), all_warnings
 
-    # ── 6. Выгрузить результат ──
-    df = conn.execute(
-        "SELECT * FROM metrics WHERE symbol=? ORDER BY ts", [symbol]
-    ).fetchdf()
-    conn.close()
+    merged = pd.concat(all_dfs, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
 
-    if not df.empty:
-        df, vw = validate_metrics(df)
+    # ── 5. Tail ──
+    if tail:
+        max_ts = merged["ts"].max()
+
+        oi_df = tail_open_interest_hist(symbol, start_time=max_ts + 1)
+        if not oi_df.empty:
+            oi_new = oi_df[oi_df["ts"] > max_ts]
+            if not oi_new.empty:
+                oi_new["symbol"] = symbol
+                oi_new["create_time"] = oi_new["ts"]
+                for col in ["count_toptrader_long_short_ratio",
+                             "sum_toptrader_long_short_ratio",
+                             "count_long_short_ratio",
+                             "sum_taker_long_short_vol_ratio"]:
+                    oi_new[col] = None
+                merged = pd.concat([merged, oi_new], ignore_index=True)
+                all_warnings.append(f"   tail OI: +{len(oi_new)} записей")
+
+        tv_df = tail_taker_vol_ratio(symbol, start_time=max_ts + 1)
+        if not tv_df.empty:
+            tv_new = tv_df[tv_df["ts"] > max_ts]
+            if not tv_new.empty:
+                tv_new["symbol"] = symbol
+                tv_new["create_time"] = tv_new["ts"]
+                for col in ["sum_open_interest", "sum_open_interest_value",
+                             "count_toptrader_long_short_ratio",
+                             "sum_toptrader_long_short_ratio",
+                             "count_long_short_ratio"]:
+                    tv_new[col] = None
+                merged = pd.concat([merged, tv_new], ignore_index=True)
+                all_warnings.append(f"   tail taker vol: +{len(tv_new)} записей")
+
+        merged = merged.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
+
+    # ── 6. Валидация ──
+    if not merged.empty:
+        merged, vw = _validate_metrics(merged)
         all_warnings.extend(vw)
 
-    if export_parquet and not df.empty:
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(pq, index=False)
-        _sync_to_bucket(symbol, df)
+    # ── 7. Загрузить в bucket ──
+    _upload_to_bucket(symbol, merged)
 
-    return df, all_warnings
-
-
-# ── Export / Summary ─────────────────────────────────────────────
-
-
-def export_all():
-    """Экспортировать все metrics из DuckDB в Parquet."""
-    db = _db_path()
-    if not db.exists():
-        print("  Кеш пуст")
-        return
-    conn = duckdb.connect(str(db), read_only=True)
-    rows = conn.execute(
-        "SELECT DISTINCT symbol FROM metrics"
-    ).fetchall()
-    conn.close()
-    for (symbol,) in rows:
-        print(f"  Экспорт {symbol} metrics")
-        fetch_metrics(symbol, export_parquet=True)
-
-
-def summary():
-    """Вывести сводку по metrics в DuckDB."""
-    db = _db_path()
-    if not db.exists():
-        print("  Кеш пуст")
-        return
-    conn = duckdb.connect(str(db), read_only=True)
-    result = conn.execute("""
-        SELECT symbol, COUNT(*), MIN(ts), MAX(ts)
-        FROM metrics
-        GROUP BY symbol
-        ORDER BY symbol
-    """).fetchall()
-    conn.close()
-
-    for symbol, cnt, t_min, t_max in result:
-        def _fmt(ts):
-            if not ts or ts <= 0:
-                return "?"
-            try:
-                return datetime.fromtimestamp(
-                    ts / 1000, tz=timezone.utc
-                ).strftime("%Y-%m-%d")
-            except (OSError, ValueError):
-                return "?"
-
-        print(f"    {symbol:>12} metrics: {cnt:>8,} записей ({_fmt(t_min)} - {_fmt(t_max)})")
+    return merged, all_warnings
 
 
 # ── CLI ───────────────────────────────────────────────────────────
@@ -456,22 +321,16 @@ def main():
     )
     parser.add_argument("--years", type=int, default=3, help="Сколько лет")
     parser.add_argument("--force", action="store_true", help="Принудительная перезагрузка")
-    parser.add_argument("--summary", action="store_true", help="Сводка по кешу")
+    parser.add_argument("--tail", action="store_true", help="Докачать хвост через API")
     args = parser.parse_args()
-
-    if args.summary:
-        summary()
-        return
 
     t0 = time.time()
     for symbol in args.symbol:
         print(f"  {symbol}: загрузка metrics...", flush=True)
-        df, warnings = fetch_metrics(symbol, args.years, force=args.force)
+        df, warnings = fetch_metrics(symbol, args.years, force=args.force, tail=args.tail)
         for w in warnings:
             print(w)
         print(f"  {symbol}: {len(df):,} записей")
-
-    summary()
     print(f"\n  Время: {time.time()-t0:.1f}s")
 
 

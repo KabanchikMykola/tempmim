@@ -1,143 +1,122 @@
-"""Бенчмарк: сколько параллельных загрузок выдерживает Binance API."""
+"""Бенчмарк: оптимальное количество воркеров для S3 архивов и REST API."""
 
-import ccxt
-import time
-import sys
 import io
+import sys
+import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+
+import requests
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
-TEST_SYMBOLS_SPOT = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-TEST_SYMBOLS_PERP = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT"]
-SINCE_MS = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
-TIMEFRAME = "1h"
+TIMEOUT = 30
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT"]
+WORKER_VALUES = [1, 2, 4, 8, 16, 32]
+
+# ── S3 архивы ─────────────────────────────────────────────────
 
 
-def make_exchange(label: str, default_type: str = "spot") -> ccxt.binance:
-    config = {"enableRateLimit": True}
-    if default_type != "spot":
-        config["options"] = {"defaultType": default_type}
-    return ccxt.binance(config)
+def _download_monthly(symbol, year, month):
+    url = (f"https://data.binance.vision/data/spot/monthly/klines/"
+           f"{symbol}/1h/{symbol}-1h-{year}-{month:02d}.zip")
+    try:
+        resp = requests.get(url, timeout=TIMEOUT)
+        if resp.status_code != 200:
+            return 0
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            with zf.open(zf.namelist()[0]) as f:
+                lines = f.read().decode("utf-8").strip().split("\n")
+        return len(lines)
+    except Exception:
+        return 0
 
 
-def fetch_one(exchange: ccxt.binance, symbol: str) -> tuple[str, int, float]:
-    """Скачать одну пару. Возвращает (symbol, bars, elapsed_sec)."""
+def benchmark_s3(symbols, months, max_workers):
+    """Скачать monthly архивы для всех symbols × months."""
+    tasks = [(s, y, m) for s in symbols for y, m in months]
     t0 = time.time()
-    all_candles = []
-    cursor = SINCE_MS
-    while True:
-        try:
-            candles = exchange.fetch_ohlcv(symbol, TIMEFRAME, since=cursor, limit=1000)
-        except Exception as e:
-            return symbol, 0, time.time() - t0
-        if not candles:
-            break
-        all_candles.extend(candles)
-        if len(candles) < 1000:
-            break
-        cursor = candles[-1][0] + 1
-        time.sleep(0.1)
-    return symbol, len(all_candles), time.time() - t0
+    results = 0
+    done = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_download_monthly, s, y, m): (s, y, m)
+                   for s in symbols for y, m in months}
+        for f in as_completed(futures):
+            rows = f.result()
+            results += rows
+            done += 1
+    elapsed = time.time() - t0
+    return elapsed, results
 
 
-def benchmark_sequential(exchange: ccxt.binance, symbols: list[str], label: str) -> float:
-    """Последовательная загрузка. Возвращает общее время."""
-    print(f"\n{'='*60}")
-    print(f"[{label}] Последовательно: {len(symbols)} символов")
-    print(f"{'='*60}")
-    t0 = time.time()
-    for s in symbols:
-        _, bars, elapsed = fetch_one(exchange, s)
-        print(f"  {s:>20}: {bars:>5} баров | {elapsed:.1f}s")
-    total = time.time() - t0
-    print(f"  ИТОГО: {total:.1f}s")
-    return total
+# ── REST API (tail) ────────────────────────────────────────────
 
 
-def benchmark_parallel(
-    exchanges: list[ccxt.binance],
-    symbols: list[str],
-    max_workers: int,
-    label: str,
-) -> float:
-    """Параллельная загрузка. Возвращает общее время."""
-    print(f"\n{'='*60}")
-    print(f"[{label}] Параллельно ({max_workers} воркеров): {len(symbols)} символов")
-    print(f"{'='*60}")
+def _fetch_klines(symbol, limit=100):
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": "1h", "limit": limit}
+    try:
+        resp = requests.get(url, params=params, timeout=TIMEOUT)
+        if resp.status_code == 200:
+            return len(resp.json())
+        return 0
+    except Exception:
+        return 0
 
-    symbol_exchanges = []
-    for i, s in enumerate(symbols):
-        ex = exchanges[i % len(exchanges)]
-        symbol_exchanges.append((ex, s))
 
+def benchmark_rest(symbols, limit, max_workers):
     t0 = time.time()
     results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(fetch_one, ex, s): s for ex, s in symbol_exchanges}
-        for future in as_completed(futures):
-            symbol, bars, elapsed = future.result()
-            results.append((symbol, bars, elapsed))
-            print(f"  {symbol:>20}: {bars:>5} баров | {elapsed:.1f}s")
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_fetch_klines, s, limit): s for s in symbols}
+        for f in as_completed(futures):
+            results.append(f.result())
+    elapsed = time.time() - t0
+    return elapsed, sum(results)
 
-    total = time.time() - t0
-    print(f"  ИТОГО: {total:.1f}s")
-    return total
+
+# ── Main ────────────────────────────────────────────────────────
 
 
 def main():
-    print("Бенчмарк Binance API: параллелизм и лимиты\n")
-    print(f"Таймфрейм: {TIMEFRAME}, с: 2026-01-01")
-    print(f"Символов для теста: {len(TEST_SYMBOLS_SPOT)} spot + {len(TEST_SYMBOLS_PERP)} perp")
+    print("Бенчмарк параллельных запросов\n")
 
-    ex_spot = make_exchange("spot", "spot")
-    ex_spot.load_markets()
-    ex_perp = make_exchange("perp", "future")
-    ex_perp.load_markets()
+    # ── 1. S3 архивы ──
+    months = [(y, m) for y in range(2025, 2026) for m in range(1, 13)]
+    n_files = len(SYMBOLS) * len(months)
+    print(f"S3: {len(SYMBOLS)} символов × {len(months)} месяцев = {n_files} monthly архивов")
+    print(f"Таймаут {TIMEOUT}s\n")
+    print(f"{'workers':>8} | {'time':>8} | {'rows':>8} | {'speed':>10}")
+    print("-" * 40)
+    best_s3 = (0, float("inf"))
+    for w in WORKER_VALUES:
+        elapsed, rows = benchmark_s3(SYMBOLS, months, w)
+        speed = rows / elapsed if elapsed > 0 else 0
+        print(f"{w:>8} | {elapsed:>7.1f}s | {rows:>8} | {speed:>8.0f} rows/s")
+        if elapsed < best_s3[1] and elapsed > 0:
+            best_s3 = (w, elapsed)
 
-    results = {}
+    # ── 2. REST API ──
+    print(f"\nREST API: {len(SYMBOLS)} символов, klines(limit=100)\n")
+    print(f"{'workers':>8} | {'time':>8} | {'bars':>8} | {'speed':>10}")
+    print("-" * 40)
+    best_rest = (0, float("inf"))
+    for w in WORKER_VALUES:
+        elapsed, bars = benchmark_rest(SYMBOLS, 100, w)
+        speed = bars / elapsed if elapsed > 0 else 0
+        print(f"{w:>8} | {elapsed:>7.1f}s | {bars:>8} | {speed:>8.0f} bars/s")
+        if elapsed < best_rest[1] and elapsed > 0:
+            best_rest = (w, elapsed)
 
-    # 1. Спот последовательно
-    results["spot_seq"] = benchmark_sequential(ex_spot, TEST_SYMBOLS_SPOT, "SPOT sequential")
-
-    # 2. Перпы последовательно
-    results["perp_seq"] = benchmark_sequential(ex_perp, TEST_SYMBOLS_PERP, "PERP sequential")
-
-    # 3. Спот+перпы через один exchange (как сейчас)
-    all_symbols_mixed = TEST_SYMBOLS_SPOT + TEST_SYMBOLS_PERP
-    results["mixed_seq"] = benchmark_sequential(ex_spot, all_symbols_mixed, "MIXED sequential (one exchange)")
-
-    # 4. Параллельно спот, 2 воркера
-    results["spot_par2"] = benchmark_parallel([ex_spot], TEST_SYMBOLS_SPOT, 2, "SPOT parallel-2")
-
-    # 5. Параллельно спот, 4 воркера
-    results["spot_par4"] = benchmark_parallel([ex_spot], TEST_SYMBOLS_SPOT, 4, "SPOT parallel-4")
-
-    # 6. Параллельно спот, 8 воркеров
-    results["spot_par8"] = benchmark_parallel([ex_spot], TEST_SYMBOLS_SPOT, 8, "SPOT parallel-8")
-
-    # 7. Параллельно спот+перпы, разные exchange, 4 воркера
-    results["split_par4"] = benchmark_parallel(
-        [ex_spot, ex_perp], TEST_SYMBOLS_SPOT + TEST_SYMBOLS_PERP, 4, "SPLIT parallel-4 (spot+perp)"
-    )
-
-    # 8. Параллельно спот+перпы, разные exchange, 8 воркеров
-    results["split_par8"] = benchmark_parallel(
-        [ex_spot, ex_perp], TEST_SYMBOLS_SPOT + TEST_SYMBOLS_PERP, 8, "SPLIT parallel-8 (spot+perp)"
-    )
-
-    # Итоги
-    print(f"\n{'='*60}")
-    print("ИТОГИ")
-    print(f"{'='*60}")
-    for name, t in results.items():
-        symbols_count = len(TEST_SYMBOLS_SPOT) if "spot" in name and "perp" not in name else (
-            len(TEST_SYMBOLS_PERP) if "perp" in name else len(TEST_SYMBOLS_SPOT) + len(TEST_SYMBOLS_PERP)
-        )
-        speed = symbols_count / t if t > 0 else 0
-        print(f"  {name:<20}: {t:>6.1f}s | {speed:.1f} символов/сек")
+    # ── Итоги ──
+    print(f"\n{'=' * 40}")
+    print(f"S3:     оптимально {best_s3[0]} воркеров ({best_s3[1]:.1f}s)")
+    print(f"REST:   оптимально {best_rest[0]} воркеров ({best_rest[1]:.1f}s)")
+    print(f"{'=' * 40}")
+    print(f"\nРекомендация для config.py:")
+    print(f"  VISION_WORKERS = {best_s3[0]}")
+    print(f"  WORKERS = {best_rest[0]}")
 
 
 if __name__ == "__main__":

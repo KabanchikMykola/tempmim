@@ -1,14 +1,12 @@
-"""CLI для загрузки данных.
+"""CLI для загрузки данных Binance.
 
 Подкоманды:
-  ohlcv ccxt      — OHLCV через ccxt API (спот + перпы)
-  ohlcv vision    — OHLCV из S3 архивов data.binance.vision
-  agg-trades       — Исторические aggTrades из S3
-  book-depth       — Исторические bookDepth из S3
-  funding          — Funding rate + перп klines из S3
-  metrics          — Derivatives metrics (OI, long/short ratios)
-  symbols          — Символы с Binance (exchangeInfo)
-  stream           — Реалтайм WebSocket pipeline
+  ohlcv vision   — OHLCV из S3 архивов data.binance.vision
+  funding        — Funding rate из S3
+  metrics        — Derivatives metrics (OI, long/short ratios)
+  hyperliquid    — HyperLiquid OHLCV из native API
+  list           — Список файлов в HuggingFace Bucket
+  menu           — Интерактивное меню
 """
 
 import sys
@@ -16,21 +14,8 @@ import io
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
-
-
-def _parse_date_args(args):
-    """Преобразовать --days или --start/--end в (start, end)."""
-    if args.days:
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=args.days)
-    elif args.start and args.end:
-        start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    else:
-        raise ValueError("Укажите --days или --start/--end")
-    return start, end
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding="utf-8")
+sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding="utf-8")
 
 
 def main():
@@ -40,135 +25,68 @@ def main():
     sub = parser.add_subparsers(dest="command")
     sub.required = True
 
-    # --- ohlcv ---
-    p_ohlcv = sub.add_parser("ohlcv", help="Загрузка OHLCV свечей")
-    ohlcv_sub = p_ohlcv.add_subparsers(dest="source")
+    # --- ohlcv vision ---
+    p_vision = sub.add_parser("ohlcv", help="OHLCV свечи")
+    ohlcv_sub = p_vision.add_subparsers(dest="source")
     ohlcv_sub.required = True
-
-    p_ccxt = ohlcv_sub.add_parser("ccxt", help="Через ccxt API (спот + перпы)")
-    p_ccxt.add_argument("--common", action="store_true", help="Пары, общие для спота и перпов")
-    p_ccxt.add_argument("--list-only", action="store_true", help="Только список символов")
-    p_ccxt.add_argument("--timeframe", default="1h", help="Таймфрейм (default: 1h)")
-    p_ccxt.add_argument("--since", default="2022-03-01", help="Дата начала (default: 2022-03-01)")
-    p_ccxt.add_argument("--min-volume", type=float, default=1_000_000, help="Мин. объём (default: 1M)")
-    p_ccxt.add_argument("--data-dir", type=Path, default=Path("data/common_1h"), help="Папка данных")
-    p_ccxt.add_argument("--workers", type=int, default=8, help="Воркеров (default: 8)")
-    p_ccxt.add_argument("--upload", action="store_true", help="Загрузить на HuggingFace")
-    p_ccxt.add_argument("--repo", type=str, help="HuggingFace repo ID (датасет)")
-    p_ccxt.add_argument("--bucket", type=str, help="HuggingFace bucket ID (напр. Kabanchik/mimo)")
-
-    p_vision = ohlcv_sub.add_parser("vision", help="Из S3 архивов (data.binance.vision)")
-    p_vision.add_argument("--symbol", nargs="+", help="Тикеры")
-    p_vision.add_argument("--all", action="store_true", help="Все общие спот+перп пары из symbols/")
-    p_vision.add_argument("--interval", default="1h", help="Таймфрейм")
-    p_vision.add_argument("--years", type=int, default=3, help="Сколько лет")
-    p_vision.add_argument("--perp", action="store_true", help="Перпетуалы вместо спота")
-    p_vision.add_argument("--tail", action="store_true", help="Докачать последние бары через REST API")
-    p_vision.add_argument("--tail-only", action="store_true", help="Только последние бары (без S3 истории)")
-
-    # --- agg-trades ---
-    p_agg = sub.add_parser("agg-trades", help="Исторические aggTrades из S3")
-    p_agg.add_argument("--symbol", default="SOLUSDT", help="Тикер")
-    p_agg.add_argument("--days", type=int, help="Последние N дней")
-    p_agg.add_argument("--start", help="Дата начала (YYYY-MM-DD)")
-    p_agg.add_argument("--end", help="Дата конца (YYYY-MM-DD)")
-
-    # --- book-depth ---
-    p_book = sub.add_parser("book-depth", help="Исторические bookDepth из S3")
-    p_book.add_argument("--symbol", default="SOLUSDT", help="Тикер")
-    p_book.add_argument("--days", type=int, help="Последние N дней")
-    p_book.add_argument("--start", help="Дата начала (YYYY-MM-DD)")
-    p_book.add_argument("--end", help="Дата конца (YYYY-MM-DD)")
+    p_vis = ohlcv_sub.add_parser("vision", help="Из S3 архивов (data.binance.vision)")
+    p_vis.add_argument("--symbol", nargs="+", help="Тикеры")
+    p_vis.add_argument("--all", action="store_true", help="Все общие спот+перп пары из symbols/")
+    p_vis.add_argument("--interval", default="1h", help="Таймфрейм")
+    p_vis.add_argument("--years", type=int, default=3, help="Сколько лет")
+    p_vis.add_argument("--perp", action="store_true", help="Перпетуалы вместо спота")
+    p_vis.add_argument("--tail", action="store_true", help="Докачать последние бары через REST API")
+    p_vis.add_argument("--tail-only", action="store_true", help="Только последние бары (без S3 истории)")
 
     # --- funding ---
     p_fund = sub.add_parser("funding", help="Funding rate из S3")
     p_fund.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"], help="Тикеры")
     p_fund.add_argument("--years", type=int, default=3, help="Сколько лет")
-
-    # --- symbols ---
-    p_sym = sub.add_parser("symbols", help="Символы с Binance (exchangeInfo)")
-    p_sym.add_argument("--output-dir", help="Папка для сохранения JSON")
-    p_sym.add_argument("--list", action="store_true", help="Вывести список общих пар")
-
-    # --- stream ---
-    p_stream = sub.add_parser("stream", help="Реалтайм WebSocket pipeline")
-
-    # --- exchange-audit ---
-    p_audit = sub.add_parser("exchange-audit", help="Аудит бирж: доступность данных")
-    p_audit.add_argument("--exchanges", nargs="+", help="Список бирж (по умолчанию все)")
-
-    # --- menu ---
-    sub.add_parser("menu", help="Интерактивное меню загрузки")
-
-    # --- webui ---
-    sub.add_parser("webui", help="WEBUI — сканер пар (Dash)")
+    p_fund.add_argument("--tail", action="store_true", help="Докачать хвост через API")
 
     # --- metrics ---
     p_metrics = sub.add_parser("metrics", help="Derivatives metrics (OI, long/short ratios)")
-    p_metrics.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"],
-                           help="Тикеры")
+    p_metrics.add_argument("--symbol", nargs="+", default=["BTCUSDT", "ETHUSDT"], help="Тикеры")
     p_metrics.add_argument("--years", type=int, default=3, help="Сколько лет")
-    p_metrics.add_argument("--force", action="store_true",
-                           help="Принудительная перезагрузка")
-    p_metrics.add_argument("--summary", action="store_true",
-                           help="Сводка по кешу metrics")
+    p_metrics.add_argument("--tail", action="store_true", help="Докачать хвост через API")
+    p_metrics.add_argument("--force", action="store_true", help="Принудительная перезагрузка")
+
+    # --- hyperliquid ---
+    p_hl = sub.add_parser("hyperliquid", help="HyperLiquid OHLCV")
+    p_hl.add_argument("--symbol", nargs="+", help="Символы (BTC, ETH, SOL...)")
+    p_hl.add_argument("--all", action="store_true", help="Все доступные символы")
+    p_hl.add_argument("--timeframe", default="1h", help="Таймфрейм (default: 1h)")
+    p_hl.add_argument("--years", type=int, default=3, help="Сколько лет (default: 3)")
+    p_hl.add_argument("--bucket", type=str, default="Kabanchik/mimo", help="HF Bucket для загрузки")
+    p_hl.add_argument("--list", action="store_true", help="Список символов")
+    p_hl.add_argument("--chain", action="store_true", help="Добавить Chainticks 2023-2024 историю (медленно)")
+
+    # --- list ---
+    sub.add_parser("list", help="Список файлов в HuggingFace Bucket")
+
+    # --- menu ---
+    p_menu = sub.add_parser("menu", help="Интерактивное меню загрузки")
+    p_menu.add_argument("--run", action="store_true", help="Запустить с сохранённым конфигом (без интерактива)")
 
     args = parser.parse_args()
 
     # --- dispatch ---
-    if args.command == "ohlcv":
-        if args.source == "ccxt":
-            _run_ccxt(args)
-        elif args.source == "vision":
-            _run_vision(args)
-    elif args.command == "agg-trades":
-        _run_agg_trades(args)
-    elif args.command == "book-depth":
-        _run_book_depth(args)
+    if args.command == "ohlcv" and args.source == "vision":
+        _run_vision(args)
     elif args.command == "funding":
         _run_funding(args)
-    elif args.command == "symbols":
-        _run_symbols(args)
-    elif args.command == "stream":
-        _run_stream(args)
-    elif args.command == "exchange-audit":
-        _run_exchange_audit(args)
-    elif args.command == "menu":
-        _run_menu(args)
-    elif args.command == "webui":
-        _run_webui(args)
     elif args.command == "metrics":
         _run_metrics(args)
-
-
-def _run_ccxt(args):
-    from data_fetcher.ccxt_api.fetcher import discover_common_symbols, run_download, upload_to_huggingface
-
-    common = discover_common_symbols(min_volume=args.min_volume)
-
-    if args.list_only:
-        for base, info in common.items():
-            print(f"  {base:>8} | {info['spot_symbol']:>16} | {info['perp_symbol']:>16} | ${info['total_volume']:>14,.0f}")
-        return
-
-    symbols = []
-    for info in common.values():
-        symbols.append(info["spot_symbol"])
-        symbols.append(info["perp_symbol"])
-
-    print(f"\nЗагрузка {len(symbols)} символов ({len(common)} пар x 2)")
-    run_download(symbols, args.timeframe, args.since, args.data_dir, args.workers)
-
-    if args.upload and args.repo:
-        upload_to_huggingface(args.data_dir, args.repo)
-
-    if args.upload and args.bucket:
-        from data_fetcher.ccxt_api.fetcher import upload_to_bucket
-        upload_to_bucket(args.data_dir, args.bucket)
+    elif args.command == "hyperliquid":
+        _run_hyperliquid(args)
+    elif args.command == "list":
+        _run_list(args)
+    elif args.command == "menu":
+        _run_menu(args)
 
 
 def _run_vision(args):
-    from data_fetcher.binance_vision.fetch_klines import fetch_symbol, summary
+    from data_fetcher.binance_vision.fetch_klines import fetch_symbol
     import json
 
     if args.all:
@@ -190,42 +108,15 @@ def _run_vision(args):
     for i, symbol in enumerate(symbols, 1):
         src = "perp" if args.perp else "spot"
         tail_label = " +tail" if args.tail else ""
-
         print(f"[{i}/{len(symbols)}] {symbol} ({src}{tail_label})...", flush=True)
         df, warnings = fetch_symbol(
             symbol, args.interval, args.years, args.perp,
-            export_parquet=True, tail=args.tail, tail_only=args.tail_only,
+            tail=args.tail, tail_only=args.tail_only,
         )
         for w in warnings:
             print(f"  {w}")
         print(f"  {symbol} ({src}): {len(df):,} баров")
-
-    summary()
     print(f"\n  Время: {ttime.time()-t0:.1f}s")
-
-
-def _run_agg_trades(args):
-    from data_fetcher.binance_vision.fetch_agg_trades import fetch_range as af
-
-    start, end = _parse_date_args(args)
-    print(f"Загрузка aggTrades: {args.symbol} {start.date()} - {end.date()}")
-    import time as ttime
-    t0 = ttime.time()
-    df = af(args.symbol, start, end)
-    print(f"  Строк: {len(df):,}")
-    print(f"  Время: {ttime.time()-t0:.1f}s")
-
-
-def _run_book_depth(args):
-    from data_fetcher.binance_vision.fetch_book_depth import fetch_range as bf
-
-    start, end = _parse_date_args(args)
-    print(f"Загрузка bookDepth: {args.symbol} {start.date()} - {end.date()}")
-    import time as ttime
-    t0 = ttime.time()
-    df = bf(args.symbol, start, end)
-    print(f"  Строк: {len(df):,}")
-    print(f"  Время: {ttime.time()-t0:.1f}s")
 
 
 def _run_funding(args):
@@ -235,62 +126,89 @@ def _run_funding(args):
     t0 = ttime.time()
     for symbol in args.symbol:
         print(f"  {symbol}: загрузка funding...", end=" ", flush=True)
-        df = fetch_funding(symbol, args.years)
+        df = fetch_funding(symbol, args.years, tail=args.tail)
         print(f"{len(df):,} записей")
     print(f"\n  Время: {ttime.time()-t0:.1f}s")
 
 
-def _run_symbols(args):
-    from data_fetcher.binance_api.fetch_symbols import fetch_all as sym_fetch
-
-    result = sym_fetch(args.output_dir)
-    if args.list:
-        print(f"\nОбщие пары ({len(result['common'])}):")
-        for s in result["common"]:
-            print(f"  {s['symbol']}")
-    print("Готово.")
-
-
-def _run_stream(args):
-    from data_fetcher.websocket.tick_pipeline import main as stream_main
-
-    import asyncio
-    asyncio.run(stream_main())
-
-
-def _run_exchange_audit(args):
-    from data_fetcher.ccxt_api.exchange_audit import run_audit
-    run_audit(args.exchanges)
-
-
-def _run_menu(args):
-    from data_fetcher.menu import main as menu_main
-    menu_main()
-
-
-def _run_webui(args):
-    from webui.app import create_app
-    app = create_app()
-    app.run(debug=True, host="127.0.0.1", port=8051)
-
-
 def _run_metrics(args):
-    from data_fetcher.binance_vision.fetch_metrics import fetch_metrics, summary
-
-    if args.summary:
-        summary()
-        return
+    from data_fetcher.binance_vision.fetch_metrics import fetch_metrics
 
     import time as ttime
     t0 = ttime.time()
     for symbol in args.symbol:
         print(f"  {symbol}: загрузка metrics...", flush=True)
-        df, warnings = fetch_metrics(symbol, args.years, force=args.force)
+        df, warnings = fetch_metrics(symbol, args.years, force=args.force, tail=args.tail)
         for w in warnings:
             print(w)
         print(f"  {symbol}: {len(df):,} записей")
-    summary()
     print(f"\n  Время: {ttime.time()-t0:.1f}s")
+
+
+def _run_hyperliquid(args):
+    from data_fetcher.hyperliquid import fetch_symbol, list_symbols
+
+    if args.list:
+        symbols = list_symbols()
+        print(f"Доступно символов: {len(symbols)}")
+        for s in symbols:
+            print(f"  {s}")
+        return
+
+    if args.all:
+        symbols = list_symbols()
+        if not symbols:
+            print("Не удалось получить список символов")
+            return
+        print(f"Загрузка {len(symbols)} символов\n")
+    elif args.symbol:
+        symbols = args.symbol
+    else:
+        symbols = ["BTC", "ETH"]
+
+    import time as ttime
+    t0 = ttime.time()
+    for i, sym in enumerate(symbols, 1):
+        print(f"[{i}/{len(symbols)}]", end=" ", flush=True)
+        df = fetch_symbol(sym, args.timeframe, args.years, upload_bucket=args.bucket, use_chain=args.chain)
+        if df.empty:
+            print(f"  {sym}: нет данных")
+    print(f"\n  Время: {ttime.time()-t0:.1f}s")
+
+
+def _run_list(args):
+    from data_fetcher.config import list_bucket, DATA_DIR
+
+    for subdir in ["binance/ohlcv_spot/", "binance/ohlcv_perp/",
+                    "binance/funding/", "binance/metrics/", "hyperliquid/"]:
+        files = list_bucket(subdir)
+        if not files:
+            continue
+        total_mb = sum(f["size_bytes"] for f in files) / 1024 / 1024
+        print(f"\n  HF Bucket: {subdir.strip('/')}  ({len(files)} файлов, {total_mb:.0f} MB)")
+        print(f"  {'─'*60}")
+        for f in sorted(files, key=lambda x: x["path"]):
+            size_kb = f["size_bytes"] / 1024
+            print(f"    {f['path']:68s} {size_kb:>8.0f} KB")
+
+    local_patterns = sorted(DATA_DIR.rglob("*.parquet"))
+    if local_patterns:
+        total_mb = sum(f.stat().st_size for f in local_patterns) / 1024 / 1024
+        print(f"\n  Local: ({len(local_patterns)} файлов, {total_mb:.0f} MB)")
+        print(f"  {'─'*60}")
+        for f in local_patterns:
+            rel = f.relative_to(DATA_DIR)
+            size_kb = f.stat().st_size / 1024
+            print(f"    {str(rel):68s} {size_kb:>8.0f} KB")
+    if not local_patterns:
+        print("\n  Локально данных нет. Запусти fetcher для загрузки.")
+    print()
+
+
+def _run_menu(args):
+    """Интерактивное меню."""
+    from data_fetcher.menu import main as menu_main
+    menu_main()
 
 
 if __name__ == "__main__":
