@@ -28,22 +28,15 @@ def validate_ohlcv(df, interval="1h", silent=False):
     if df.empty:
         return df, warnings
 
-    before = len(df)
+    # 1. Zero-volume — предупреждение, строки НЕ удаляются
+    n_zero = (df["volume"] == 0).sum()
+    if n_zero > 0:
+        warnings.append(f"    {n_zero} zero-volume строк (оставлены)")
 
-    # 1. Zero-volume (техобслуживание биржи)
-    df = df[df["volume"] > 0].copy()
-    dropped = before - len(df)
-    if dropped > 0:
-        warnings.append(f"    {dropped} zero-volume строк удалено")
-    if df.empty:
-        return df, warnings
-
-    # 2. Дубликаты по ts
-    before = len(df)
-    df = df.drop_duplicates(subset=["ts"])
-    dropped = before - len(df)
-    if dropped > 0:
-        warnings.append(f"    {dropped} дубликатов удалено")
+    # 2. Дубликаты по ts — предупреждение, строки НЕ удаляются
+    n_dup = df.duplicated(subset=["ts"]).sum()
+    if n_dup > 0:
+        warnings.append(f"    {n_dup} дубликатов (оставлены)")
 
     # 3. Сортировка
     df = df.sort_values("ts").reset_index(drop=True)

@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+import pandas as pd
+
 # HF токен для записи в bucket (задаётся через HF_TOKEN env, иначе чтение без записи)
 # Если не задан, bucket работает только на чтение.
 
@@ -20,7 +22,6 @@ VISION_TIMEOUT = 30
 DATA_DIR = Path("fin_data")
 BUCKET_ID = "Kabanchik/mimo"
 BUCKET_PREFIX = "fin_data"
-CACHE_DIR = DATA_DIR / "cache"
 
 # === Binance market dirs ===
 MARKET_DIRS = {
@@ -32,6 +33,24 @@ MARKET_DIRS = {
 
 # === HF bucket URIs ===
 BUCKET_URI = f"hf://buckets/{BUCKET_ID}/{BUCKET_PREFIX}/binance"
+
+
+def bucket_load(uri: str):
+    """Прочитать parquet из HF bucket."""
+    if not BUCKET_ID:
+        return None
+    try:
+        df = pd.read_parquet(uri)
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+def bucket_upload(uri: str, df):
+    """Записать parquet в HF bucket."""
+    if df is None or df.empty or not BUCKET_ID:
+        return
+    df.to_parquet(uri, index=False)
 
 
 def list_bucket(prefix: str = "") -> list[dict]:

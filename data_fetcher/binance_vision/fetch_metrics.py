@@ -106,41 +106,50 @@ def download_daily(symbol, date_str):
 
 
 def _load_from_bucket(symbol):
-    """Прочитать metrics parquet из bucket."""
-    if not config.BUCKET_ID:
-        return None
-    try:
-        uri = _bucket_parquet_uri(symbol)
-        df = pd.read_parquet(uri)
-        return df if not df.empty else None
-    except Exception:
-        return None
+    return config.bucket_load(_bucket_parquet_uri(symbol))
 
 
 def _upload_to_bucket(symbol, df):
-    """Загрузить metrics parquet в bucket."""
-    if df is None or df.empty or not config.BUCKET_ID:
-        return
-    uri = _bucket_parquet_uri(symbol)
-    df.to_parquet(uri, index=False)
+    config.bucket_upload(_bucket_parquet_uri(symbol), df)
 
 
-# ── Валидация ────────────────────────────────────────────────────
+# ── Tail helper ──────────────────────────────────────────────────
 
 
-def _validate_metrics(df):
-    """Проверить и почистить metrics данные."""
+def _append_metrics_tail(df, symbol, start_time):
+    """Докачать OI + taker vol через REST API."""
+    max_ts = df["ts"].max()
     warnings = []
-    if df.empty:
-        return df, warnings
 
-    before = len(df)
-    df = df.drop_duplicates(subset=["symbol", "ts"])
-    dropped = before - len(df)
-    if dropped > 0:
-        warnings.append(f"  {dropped} дубликатов удалено")
+    oi_df = tail_open_interest_hist(symbol, start_time=start_time)
+    if not oi_df.empty:
+        oi_new = oi_df[oi_df["ts"] > max_ts]
+        if not oi_new.empty:
+            oi_new["symbol"] = symbol
+            oi_new["create_time"] = oi_new["ts"]
+            for col in ["count_toptrader_long_short_ratio",
+                         "sum_toptrader_long_short_ratio",
+                         "count_long_short_ratio",
+                         "sum_taker_long_short_vol_ratio"]:
+                oi_new[col] = None
+            df = pd.concat([df, oi_new], ignore_index=True)
+            warnings.append(f"   tail OI: +{len(oi_new)} записей")
 
-    df = df.sort_values("ts").reset_index(drop=True)
+    tv_df = tail_taker_vol_ratio(symbol, start_time=start_time)
+    if not tv_df.empty:
+        tv_new = tv_df[tv_df["ts"] > max_ts]
+        if not tv_new.empty:
+            tv_new["symbol"] = symbol
+            tv_new["create_time"] = tv_new["ts"]
+            for col in ["sum_open_interest", "sum_open_interest_value",
+                         "count_toptrader_long_short_ratio",
+                         "sum_toptrader_long_short_ratio",
+                         "count_long_short_ratio"]:
+                tv_new[col] = None
+            df = pd.concat([df, tv_new], ignore_index=True)
+            warnings.append(f"   tail taker vol: +{len(tv_new)} записей")
+
+    df = df.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
     return df, warnings
 
 
@@ -161,7 +170,6 @@ def fetch_metrics(symbol, years=3, force=False, tail=True):
     """
     all_warnings = []
 
-    # ── 1. Загрузить существующие данные из bucket ──
     existing = _load_from_bucket(symbol)
     if existing is not None and len(existing) > 1000 and not force:
         max_ts = existing["ts"].max()
@@ -170,47 +178,16 @@ def fetch_metrics(symbol, years=3, force=False, tail=True):
 
         if gap_days <= 2:
             if tail:
-                # Tail OI
-                oi_df = tail_open_interest_hist(symbol, start_time=max_ts + 1)
-                if not oi_df.empty:
-                    oi_new = oi_df[oi_df["ts"] > max_ts]
-                    if not oi_new.empty:
-                        oi_new["symbol"] = symbol
-                        oi_new["create_time"] = oi_new["ts"]
-                        for col in ["count_toptrader_long_short_ratio",
-                                     "sum_toptrader_long_short_ratio",
-                                     "count_long_short_ratio",
-                                     "sum_taker_long_short_vol_ratio"]:
-                            oi_new[col] = None
-                        existing = pd.concat([existing, oi_new], ignore_index=True)
-                        all_warnings.append(f"   tail OI: +{len(oi_new)} записей")
-
-                # Tail taker vol
-                tv_df = tail_taker_vol_ratio(symbol, start_time=max_ts + 1)
-                if not tv_df.empty:
-                    tv_new = tv_df[tv_df["ts"] > max_ts]
-                    if not tv_new.empty:
-                        tv_new["symbol"] = symbol
-                        tv_new["create_time"] = tv_new["ts"]
-                        for col in ["sum_open_interest", "sum_open_interest_value",
-                                     "count_toptrader_long_short_ratio",
-                                     "sum_toptrader_long_short_ratio",
-                                     "count_long_short_ratio"]:
-                            tv_new[col] = None
-                        existing = pd.concat([existing, tv_new], ignore_index=True)
-                        all_warnings.append(f"   tail taker vol: +{len(tv_new)} записей")
-
-                if all_warnings:
-                    existing = existing.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
+                existing, tw = _append_metrics_tail(existing, symbol, max_ts + 1)
+                all_warnings.extend(tw)
+                if tw:
                     _upload_to_bucket(symbol, existing)
-
-            existing, vw = _validate_metrics(existing)
+            existing, vw = validate_metrics(existing)
             all_warnings.extend(vw)
             return existing, all_warnings
 
         all_warnings.append(f"  данные устарели на {gap_days:.0f}д — докачка")
 
-    # ── 2. Определить недостающие даты ──
     all_dates = _generate_dates(years)
     max_ts = existing["ts"].max() if existing is not None and not existing.empty else 0
 
@@ -221,11 +198,10 @@ def fetch_metrics(symbol, years=3, force=False, tail=True):
         dates_to_fetch = all_dates
 
     if not dates_to_fetch and existing is not None and not existing.empty:
-        existing, vw = _validate_metrics(existing)
+        existing, vw = validate_metrics(existing)
         all_warnings.extend(vw)
         return existing, all_warnings
 
-    # ── 3. Параллельная загрузка с S3 ──
     def _fetch_one(date_str):
         df = download_daily(symbol, date_str)
         if not df.empty:
@@ -249,7 +225,6 @@ def fetch_metrics(symbol, years=3, force=False, tail=True):
     if errors > 0:
         all_warnings.append(f"  {errors} ошибок загрузки")
 
-    # ── 4. Склеить ──
     all_dfs = []
     if existing is not None and not existing.empty:
         all_dfs.append(existing)
@@ -261,46 +236,14 @@ def fetch_metrics(symbol, years=3, force=False, tail=True):
     merged = pd.concat(all_dfs, ignore_index=True)
     merged = merged.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
 
-    # ── 5. Tail ──
     if tail:
-        max_ts = merged["ts"].max()
+        merged, tw = _append_metrics_tail(merged, symbol, merged["ts"].max() + 1)
+        all_warnings.extend(tw)
 
-        oi_df = tail_open_interest_hist(symbol, start_time=max_ts + 1)
-        if not oi_df.empty:
-            oi_new = oi_df[oi_df["ts"] > max_ts]
-            if not oi_new.empty:
-                oi_new["symbol"] = symbol
-                oi_new["create_time"] = oi_new["ts"]
-                for col in ["count_toptrader_long_short_ratio",
-                             "sum_toptrader_long_short_ratio",
-                             "count_long_short_ratio",
-                             "sum_taker_long_short_vol_ratio"]:
-                    oi_new[col] = None
-                merged = pd.concat([merged, oi_new], ignore_index=True)
-                all_warnings.append(f"   tail OI: +{len(oi_new)} записей")
-
-        tv_df = tail_taker_vol_ratio(symbol, start_time=max_ts + 1)
-        if not tv_df.empty:
-            tv_new = tv_df[tv_df["ts"] > max_ts]
-            if not tv_new.empty:
-                tv_new["symbol"] = symbol
-                tv_new["create_time"] = tv_new["ts"]
-                for col in ["sum_open_interest", "sum_open_interest_value",
-                             "count_toptrader_long_short_ratio",
-                             "sum_toptrader_long_short_ratio",
-                             "count_long_short_ratio"]:
-                    tv_new[col] = None
-                merged = pd.concat([merged, tv_new], ignore_index=True)
-                all_warnings.append(f"   tail taker vol: +{len(tv_new)} записей")
-
-        merged = merged.drop_duplicates(subset=["symbol", "ts"]).sort_values("ts").reset_index(drop=True)
-
-    # ── 6. Валидация ──
     if not merged.empty:
-        merged, vw = _validate_metrics(merged)
+        merged, vw = validate_metrics(merged)
         all_warnings.extend(vw)
 
-    # ── 7. Загрузить в bucket ──
     _upload_to_bucket(symbol, merged)
 
     return merged, all_warnings

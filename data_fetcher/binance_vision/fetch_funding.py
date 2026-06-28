@@ -31,23 +31,11 @@ def _bucket_parquet_uri(symbol):
 
 
 def _load_from_bucket(symbol):
-    """Прочитать funding parquet из bucket."""
-    if not config.BUCKET_ID:
-        return None
-    try:
-        uri = _bucket_parquet_uri(symbol)
-        df = pd.read_parquet(uri)
-        return df if not df.empty else None
-    except Exception:
-        return None
+    return config.bucket_load(_bucket_parquet_uri(symbol))
 
 
 def _upload_to_bucket(symbol, df):
-    """Загрузить funding parquet в bucket."""
-    if df is None or df.empty or not config.BUCKET_ID:
-        return
-    uri = _bucket_parquet_uri(symbol)
-    df.to_parquet(uri, index=False)
+    config.bucket_upload(_bucket_parquet_uri(symbol), df)
 
 
 def download_funding_monthly(symbol, year, month):

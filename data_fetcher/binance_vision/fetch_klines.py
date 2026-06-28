@@ -1,9 +1,6 @@
-"""Загрузка OHLCV klines с data.binance.vision.
+"""Загрузка OHLCV klines с data.binance.vision + докачка через REST API.
 
-Трёхуровневый кеш:
-1. Parquet файл (data/{symbol}_{interval}_{source}.parquet)
-2. DuckDB кеш (data/cache/binance_vision.db)
-3. Скачивание с data.binance.vision (S3 архивы)
+Хранилище: HuggingFace Bucket (один parquet на символ).
 
 Использование:
     python -m data_fetcher ohlcv vision --symbol BTCUSDT --interval 1h
@@ -63,7 +60,7 @@ def _normalize_timestamps(df):
 # ── Binance REST API tail ────────────────────────────────────────
 
 
-from data_fetcher.binance_api.klines import fetch_tail
+from data_fetcher.binance_api.tail import tail_klines as fetch_tail
 
 
 # ── S3 download helpers ──────────────────────────────────────────
@@ -74,94 +71,67 @@ def _bucket_parquet_uri(symbol, interval, source):
     return f"{config.BUCKET_URI}/{market_dir}/{symbol}_{interval}.parquet"
 
 
+def _bucket_uri(symbol, interval, source):
+    return _bucket_parquet_uri(symbol, interval, source)
+
+
 def _load_from_bucket(symbol, interval, source):
-    """Прочитать единый parquet из bucket."""
-    if not config.BUCKET_ID:
-        return None
-    uri = _bucket_parquet_uri(symbol, interval, source)
-    try:
-        df = pd.read_parquet(uri)
-        if df.empty:
-            return None
-        return df
-    except Exception:
-        return None
+    return config.bucket_load(_bucket_uri(symbol, interval, source))
 
 
 def _upload_to_bucket(symbol, interval, source, df):
-    """Загрузить DataFrame как единый parquet в bucket."""
-    if df is None or df.empty or not config.BUCKET_ID:
-        return
-    uri = _bucket_parquet_uri(symbol, interval, source)
-    df.to_parquet(uri, index=False)
+    config.bucket_upload(_bucket_uri(symbol, interval, source), df)
+
+
+KLINES_COLS = [
+    "open_time", "open", "high", "low", "close", "volume",
+    "close_time", "quote_volume", "count",
+    "taker_buy_base", "taker_buy_quote", "ignore",
+]
+
+KLINES_NUMERIC = ("open_time", "close_time", "count")
+KLINES_PRICE = ("open", "high", "low", "close", "volume",
+                "quote_volume", "taker_buy_base", "taker_buy_quote")
+
+
+def _download_archive(url):
+    """Скачать CSV-архив klines (monthly или daily)."""
+    try:
+        resp = requests.get(url, timeout=config.VISION_TIMEOUT)
+        if resp.status_code != 200:
+            return pd.DataFrame()
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            with zf.open(zf.namelist()[0]) as f:
+                content = f.read().decode("utf-8")
+                lines = content.strip().split("\n")
+                if not lines:
+                    return pd.DataFrame()
+                if lines[0].startswith("open_time"):
+                    lines = lines[1:]
+                data = [line.split(",") for line in lines]
+                df = pd.DataFrame(data, columns=KLINES_COLS)
+                for col in KLINES_NUMERIC:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                for col in KLINES_PRICE:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                return _normalize_timestamps(df)
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 
 def download_monthly(symbol, interval, year, month, perp=False):
-    """Скачать один месячный архив klines с data.binance.vision."""
     src = "futures/um" if perp else "spot"
     url = (f"https://data.binance.vision/data/{src}/monthly/klines/"
            f"{symbol}/{interval}/{symbol}-{interval}-{year}-{month:02d}.zip")
-    try:
-        resp = requests.get(url, timeout=config.VISION_TIMEOUT)
-        if resp.status_code != 200:
-            return pd.DataFrame()
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            with zf.open(zf.namelist()[0]) as f:
-                content = f.read().decode("utf-8")
-                lines = content.strip().split("\n")
-                if not lines:
-                    return pd.DataFrame()
-                if lines[0].startswith("open_time"):
-                    lines = lines[1:]
-                data = [line.split(",") for line in lines]
-                df = pd.DataFrame(data, columns=[
-                    "open_time", "open", "high", "low", "close", "volume",
-                    "close_time", "quote_volume", "count",
-                    "taker_buy_base", "taker_buy_quote", "ignore",
-                ])
-                for col in ("open_time", "close_time", "count"):
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                for col in ("open", "high", "low", "close", "volume",
-                            "quote_volume", "taker_buy_base", "taker_buy_quote"):
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                return _normalize_timestamps(df)
-    except Exception:
-        pass
-    return pd.DataFrame()
+    return _download_archive(url)
 
 
 def download_daily(symbol, interval, date_str, perp=False):
-    """Скачать один дневной архив klines."""
     src = "futures/um" if perp else "spot"
     url = (f"https://data.binance.vision/data/{src}/daily/klines/"
            f"{symbol}/{interval}/{symbol}-{interval}-{date_str}.zip")
-    try:
-        resp = requests.get(url, timeout=config.VISION_TIMEOUT)
-        if resp.status_code != 200:
-            return pd.DataFrame()
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            with zf.open(zf.namelist()[0]) as f:
-                content = f.read().decode("utf-8")
-                lines = content.strip().split("\n")
-                if not lines:
-                    return pd.DataFrame()
-                if lines[0].startswith("open_time"):
-                    lines = lines[1:]
-                data = [line.split(",") for line in lines]
-                df = pd.DataFrame(data, columns=[
-                    "open_time", "open", "high", "low", "close", "volume",
-                    "close_time", "quote_volume", "count",
-                    "taker_buy_base", "taker_buy_quote", "ignore",
-                ])
-                for col in ("open_time", "close_time", "count"):
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                for col in ("open", "high", "low", "close", "volume",
-                            "quote_volume", "taker_buy_base", "taker_buy_quote"):
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                return _normalize_timestamps(df)
-    except Exception:
-        pass
-    return pd.DataFrame()
+    return _download_archive(url)
 
 
 
@@ -187,7 +157,7 @@ def _generate_months(years, end_time=None):
 
 
 def fetch_symbol(symbol, interval="1h", years=3, perp=False,
-                 export_parquet=True, tail=False, tail_only=False, validate=True,
+                 tail=False, tail_only=False, validate=True,
                  end_time=None):
     """Загрузить klines для одного символа.
 
@@ -196,7 +166,6 @@ def fetch_symbol(symbol, interval="1h", years=3, perp=False,
         interval: Таймфрейм (1m, 5m, 15m, 1h, 4h, 1d)
         years: Сколько лет качать с S3
         perp: True = перпетуалы, False = спот
-        export_parquet: Экспортировать в Parquet после загрузки
         tail: Докачать хвост через Binance REST API
         tail_only: ТОЛЬКО хвост, без S3 и кеша
         validate: Запустить валидацию после загрузки
@@ -381,7 +350,7 @@ def main():
         print(f"  {symbol} ({src_name}): загрузка...", flush=True)
         df, warnings = fetch_symbol(
             symbol, args.interval, args.years, args.perp,
-            export_parquet=True, tail=args.tail,
+            tail=args.tail,
         )
         for w in warnings:
             print(w)
